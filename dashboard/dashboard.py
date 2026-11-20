@@ -7,6 +7,9 @@ ja näyttää:
   - valoanturin nykyisen arvon
   - valoanturin arvon kaaviona viimeisten minuuttien ajalta (liike merkittynä taustaan)
 
+Jos sarjaporttia ei saada auki tai data lakkaa tulemasta, dashboard näyttää siitä
+punaisen ilmoituksen ja yrittää yhdistää uudelleen automaattisesti.
+
 Kaikki vastaanotettu data tallentuu myös CSV-tiedostoon.
 
 Käyttö:
@@ -31,6 +34,19 @@ from matplotlib.patches import Patch
 
 HISTORY_S = 120          # kuinka monta sekuntia kaavio näyttää
 ADC_MAX = 1023
+NO_DATA_S = 3            # näin pitkä tauko datassa näytetään virheenä
+RETRY_S = 2              # kuinka usein porttia yritetään avata uudelleen
+
+# Tumma teema
+BG = "#111418"
+PANEL = "#181c22"
+TEXT = "#e6e9ef"
+MUTED = "#9aa4b2"
+GRID = "#2c333d"
+LIGHT_COLOR = "#4ea1ff"
+MOTION_COLOR = "#f59e0b"
+ERROR_BG = "#5c1a1a"
+ERROR_EDGE = "#ef4444"
 
 
 class State:
@@ -42,13 +58,17 @@ class State:
         self.light = deque()
         self.pir = deque()
         self.last_seen = None        # time.time() viimeisestä liikkeestä
+        self.last_data = None        # time.time() viimeisestä kelvollisesta rivistä
+        self.connected_at = None
         self.status = "Odotetaan dataa..."
+        self.error = None            # näkyvä virheilmoitus tai None
 
     def add(self, t, pir, light):
         with self.lock:
             self.times.append(t)
             self.light.append(light)
             self.pir.append(pir)
+            self.last_data = t
             if pir:
                 self.last_seen = t
             while self.times and self.times[0] < t - HISTORY_S:
@@ -56,9 +76,16 @@ class State:
                 self.light.popleft()
                 self.pir.popleft()
 
+    def set_connection(self, status, error=None, connected=False):
+        with self.lock:
+            self.status = status
+            self.error = error
+            self.connected_at = time.time() if connected else None
+
     def snapshot(self):
         with self.lock:
-            return list(self.times), list(self.light), list(self.pir), self.last_seen, self.status
+            return (list(self.times), list(self.light), list(self.pir), self.last_seen,
+                    self.last_data, self.connected_at, self.status, self.error)
 
 
 def parse_line(line):
@@ -73,6 +100,22 @@ def parse_line(line):
     if pir not in (0, 1) or not 0 <= light <= ADC_MAX:
         return None
     return pir, light
+
+
+def explain_open_error(port, message):
+    """Muuttaa pyserialin virheilmoituksen ohjeeksi käyttäjälle."""
+    text = message.lower()
+    if "access is denied" in text or "busy" in text or "errno 16" in text:
+        return (f"Sarjaporttia {port} ei saada auki: se on käytössä toisessa ohjelmassa.\n"
+                "Sulje Arduino IDE:n Serial Monitor (tai muu sarjaterminaali).\n"
+                "Dashboard yhdistää automaattisesti, kun portti vapautuu.")
+    if "permission denied" in text:
+        return (f"Ei oikeutta avata sarjaporttia {port}.\n"
+                "Linux: lisää käyttäjä dialout-ryhmään ja kirjaudu uudelleen sisään.")
+    if "cannot find" in text or "no such file" in text or "filenotfound" in text:
+        return (f"Sarjaporttia {port} ei löydy.\n"
+                "Onko Arduino kytketty USB:llä? Tarkista portin nimi (--port).")
+    return f"Sarjaporttia {port} ei saada auki:\n{message}"
 
 
 def find_port():
@@ -96,8 +139,15 @@ def serial_reader(port, baud, state, log):
     import serial
     while True:
         try:
-            with serial.Serial(port, baud, timeout=1) as ser:
-                state.status = f"Yhdistetty: {port}"
+            ser = serial.Serial(port, baud, timeout=1)
+        except (serial.SerialException, OSError) as e:
+            state.set_connection(f"Ei yhteyttä: {port}", explain_open_error(port, str(e)))
+            time.sleep(RETRY_S)
+            continue
+
+        state.set_connection(f"Yhdistetty: {port}", connected=True)
+        try:
+            with ser:
                 while True:
                     raw = ser.readline().decode("ascii", errors="ignore")
                     sample = parse_line(raw)
@@ -106,13 +156,16 @@ def serial_reader(port, baud, state, log):
                     now = time.time()
                     state.add(now, *sample)
                     log.writerow([datetime.fromtimestamp(now).isoformat(timespec="milliseconds"), *sample])
-        except serial.SerialException as e:
-            state.status = f"Yhteys katkesi ({e}), yritetään uudelleen..."
-            time.sleep(2)
+        except (serial.SerialException, OSError) as e:
+            state.set_connection(f"Ei yhteyttä: {port}",
+                                 f"Yhteys sarjaporttiin {port} katkesi.\n"
+                                 f"Onko USB-kaapeli irronnut? ({e})")
+            time.sleep(RETRY_S)
 
 
 def demo_reader(state, log):
     """Testidata: valo vaihtelee hitaasti, ja liikettä tulee välillä."""
+    state.set_connection("Demotila: testidata", connected=True)
     pir_until = 0
     while True:
         now = time.time()
@@ -139,29 +192,45 @@ def format_last_seen(last_seen, now):
 
 
 def build_figure():
+    plt.style.use("dark_background")
     fig, (ax_info, ax) = plt.subplots(2, 1, figsize=(9, 6), gridspec_kw={"height_ratios": [1, 3]})
+    fig.patch.set_facecolor(BG)
     fig.canvas.manager.set_window_title("Luxlamppu - dashboard")
     ax_info.axis("off")
-    seen_text = ax_info.text(0.0, 0.75, "", fontsize=14, fontweight="bold", transform=ax_info.transAxes)
-    light_text = ax_info.text(0.0, 0.35, "", fontsize=13, transform=ax_info.transAxes)
-    status_text = ax_info.text(0.0, 0.0, "", fontsize=9, color="gray", transform=ax_info.transAxes)
+    seen_text = ax_info.text(0.0, 0.75, "", fontsize=14, fontweight="bold", color=TEXT,
+                             transform=ax_info.transAxes)
+    light_text = ax_info.text(0.0, 0.35, "", fontsize=13, color=TEXT, transform=ax_info.transAxes)
+    status_text = ax_info.text(0.0, 0.0, "", fontsize=9, color=MUTED, transform=ax_info.transAxes)
 
-    (line,) = ax.plot([], [], color="tab:blue", label="valoanturi")
+    ax.set_facecolor(PANEL)
+    (line,) = ax.plot([], [], color=LIGHT_COLOR, linewidth=1.8, label="valoanturi")
     ax.set_xlim(-HISTORY_S, 0)
     ax.set_ylim(0, ADC_MAX)
-    ax.set_xlabel("aika (s, 0 = nyt)")
-    ax.set_ylabel("valoanturin arvo (ADC 0–1023)")
-    ax.grid(alpha=0.3)
-    ax.legend(handles=[line, Patch(color="tab:orange", alpha=0.2, label="liike havaittu")], loc="upper left")
+    ax.set_xlabel("aika (s, 0 = nyt)", color=MUTED)
+    ax.set_ylabel("valoanturin arvo (ADC 0–1023)", color=MUTED)
+    ax.tick_params(colors=MUTED)
+    for spine in ax.spines.values():
+        spine.set_color(GRID)
+    ax.grid(color=GRID, alpha=0.8)
+    ax.legend(handles=[line, Patch(color=MOTION_COLOR, alpha=0.3, label="liike havaittu")],
+              loc="upper left", facecolor=PANEL, edgecolor=GRID, labelcolor=TEXT)
+
+    # Virheilmoitus näkyy kaavion päällä vain, kun jokin on vialla
+    error_text = fig.text(0.5, 0.45, "", ha="center", va="center", fontsize=13, fontweight="bold",
+                          color="white", zorder=10, linespacing=1.6,
+                          bbox=dict(boxstyle="round,pad=0.9", facecolor=ERROR_BG,
+                                    edgecolor=ERROR_EDGE, linewidth=2))
+    error_text.set_visible(False)
+
     fig.tight_layout()
-    return fig, ax, line, seen_text, light_text, status_text
+    return fig, ax, line, seen_text, light_text, status_text, error_text
 
 
-def make_updater(state, ax, line, seen_text, light_text, status_text):
+def make_updater(state, ax, line, seen_text, light_text, status_text, error_text):
     motion_fill = [None]
 
     def update(_frame):
-        times, light, pir, last_seen, status = state.snapshot()
+        times, light, pir, last_seen, last_data, connected_at, status, error = state.snapshot()
         now = time.time()
         rel = [t - now for t in times]
         line.set_data(rel, light)
@@ -169,8 +238,7 @@ def make_updater(state, ax, line, seen_text, light_text, status_text):
         if motion_fill[0] is not None:
             motion_fill[0].remove()
         motion_fill[0] = ax.fill_between(rel, 0, ADC_MAX, where=[p == 1 for p in pir],
-                                         step="post", color="tab:orange", alpha=0.2, linewidth=0,
-                                         label="liike")
+                                         step="post", color=MOTION_COLOR, alpha=0.3, linewidth=0)
 
         seen_text.set_text(format_last_seen(last_seen, now))
         if light:
@@ -179,7 +247,18 @@ def make_updater(state, ax, line, seen_text, light_text, status_text):
         else:
             light_text.set_text("Valoisuus nyt: –")
         status_text.set_text(status)
-        return line, seen_text, light_text, status_text
+
+        # Portti on auki, mutta dataa ei tule: väärä ohjelma, väärä nopeus tai kortti jumissa
+        if error is None and connected_at is not None:
+            since = now - (last_data if last_data and last_data > connected_at else connected_at)
+            if since > NO_DATA_S:
+                error = (f"Ei dataa Arduinolta {int(since)} sekuntiin.\n"
+                         "Onko kortille ladattu oikea ohjelma ja nopeus 9600 baudia?")
+
+        error_text.set_visible(error is not None)
+        if error is not None:
+            error_text.set_text(error)
+        return line, seen_text, light_text, status_text, error_text
 
     return update
 
@@ -199,15 +278,14 @@ def main():
     log.writerow(["aika", "pir", "valo"])
 
     if args.demo:
-        state.status = "Demotila: testidata"
         target, targs = demo_reader, (state, log)
     else:
         port = args.port or find_port()
         target, targs = serial_reader, (port, args.baud, state, log)
     threading.Thread(target=target, args=targs, daemon=True).start()
 
-    fig, ax, line, seen_text, light_text, status_text = build_figure()
-    update = make_updater(state, ax, line, seen_text, light_text, status_text)
+    fig, ax, line, seen_text, light_text, status_text, error_text = build_figure()
+    update = make_updater(state, ax, line, seen_text, light_text, status_text, error_text)
     _anim = FuncAnimation(fig, update, interval=200, cache_frame_data=False)
     plt.show()
     logfile.close()
