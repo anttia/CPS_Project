@@ -34,6 +34,8 @@ Grove-johtojen valkoinen johdin (NC) jää kytkemättä. PIR:n jumpperi Re_trig-
 
 Dashboard tallentaa kaiken vastaanotetun datan tiedostoon `mittaus_<päivämäärä>.csv`.
 
+Dashboardin alareunan liukusäätimellä asetetaan tavoitekirkkaus anturin yksiköissä, ja se näkyy kaaviossa vihreänä katkoviivana. Painike "Käytä nykyistä lukemaa" asettaa tavoitteeksi anturin sen hetkisen lukeman. Tavoitetta ei vielä lähetetä Arduinolle; se otetaan käyttöön, kun lampun säätö lisätään firmwareen.
+
 ## Viestimuoto
 
 Arduino lähettää viisi kertaa sekunnissa rivin `pir,valo`, esimerkiksi `1,523`:
