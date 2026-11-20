@@ -1,0 +1,9 @@
+# Dashboardin mittaustiedostot
+mittaus_*.csv
+__pycache__/
+*.pyc
+.venv/
+# Käännöstulokset
+*.elf
+*.hex
+build/
