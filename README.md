@@ -30,7 +30,7 @@ Grove-johtojen valkoinen johdin (NC) jää kytkemättä. PIR:n jumpperi Re_trig-
    python dashboard.py --port COM3  # tai portti käsin
    python dashboard.py --demo       # testidata ilman Arduinoa
    ```
-   Sulje Arduino IDE:n Serial Monitor ennen dashboardin käynnistystä: sama portti ei voi olla auki kahdessa ohjelmassa.
+   Sulje Arduino IDE:n Serial Monitor ennen dashboardin käynnistystä: sama portti ei voi olla auki kahdessa ohjelmassa. Jos portti on varattu, puuttuu tai data lakkaa tulemasta, dashboard näyttää punaisen ilmoituksen ja yhdistää automaattisesti uudelleen, kun portti vapautuu.
 
 Dashboard tallentaa kaiken vastaanotetun datan tiedostoon `mittaus_<päivämäärä>.csv`.
 
