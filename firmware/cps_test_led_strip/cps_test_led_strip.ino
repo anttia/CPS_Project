@@ -22,7 +22,7 @@
 #include <util/delay.h>
 
 #define NUM_LEDS          40     // nauhan LEDien määrä
-#define CURRENT_LIMIT_MA  350    // 350 = virta Arduinon 5V-pinnistä; esim. 1800 = oma 5 V / 2 A lähde
+#define CURRENT_LIMIT_MA  900    // 900 = USB-breakout ja laturi (vähintään 1 A); 350 = virta Arduinon 5V-pinnistä; 1800 = 2 A:n laturi, johdot suoraan nauhaan
 #define FADE_MS           2500   // kirkastumisen ja himmenemisen kesto
 #define FRAME_MS          20     // päivitysväli
 
