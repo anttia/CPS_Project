@@ -7,6 +7,7 @@ Cyber-Physical Systems -kurssin lopputyö. Lamppu (osoitettava LED-nauha) pitä�
 | Kansio | Sisältö |
 | --- | --- |
 | `firmware/valo_liike_usb/` | Arduino Uno R3: lukee PIR- ja valoanturin ja lähettää arvot USB:n kautta |
+| `firmware/cps_test_led_strip/` | LED-nauhan testi: kirkkaus 0–100 % ja värin vaihto, data D6:ssa, virtabudjetti asetettavissa |
 | `dashboard/` | PC-dashboard (Python): viimeisin havaittu liike, nykyinen valoisuus ja valoisuuskaavio |
 
 ## Kytkennät (Arduino Uno R3)
