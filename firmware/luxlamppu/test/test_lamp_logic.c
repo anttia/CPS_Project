@@ -84,8 +84,8 @@ static void test_presence(void) {
     l.hold_ms = 30000;
     uint32_t goodbye = 0, off = 0, welcome = 0, on = 0;
     uint8_t prev = l.state;
-    for (uint32_t t = 0; t <= 140000; t += 100) {
-        uint8_t pir = (t < 60000 || (t >= 120000 && t < 121000)) ? 1 : 0;
+    for (uint32_t t = 0; t <= 200000; t += 100) {
+        uint8_t pir = (t < 60000 || t >= 150000) ? 1 : 0;   // ihminen palaa 150 s:n kohdalla
         lamp_step(&l, t, pir, sensor(30, 2.0, avg_pct(&l, t)));
         if (l.state != prev) {
             if (l.state == LAMP_GOODBYE) goodbye = t;
@@ -95,32 +95,66 @@ static void test_presence(void) {
             prev = l.state;
         }
     }
-    printf("liike loppui 60,0 s: sammumisanimaatio %.1f s, pois %.1f s, liike 120,0 s: herääminen %.1f s, säätö %.1f s\n",
+    printf("liike loppui 60,0 s: sammumisanimaatio %.1f s, pois %.1f s; liike taas 150,0 s: herääminen %.1f s, säätö %.1f s\n",
            goodbye / 1000.0, off / 1000.0, welcome / 1000.0, on / 1000.0);
     CHECK(goodbye >= 90000 && goodbye <= 90200, "sammumisanimaatio väärään aikaan");
     CHECK(off >= goodbye + LAMP_ANIM_MS && off <= goodbye + LAMP_ANIM_MS + 200, "nauha ei sammunut animaation jälkeen");
-    CHECK(welcome == 120000, "herääminen ei alkanut liikkeestä");
+    CHECK(welcome == 150000, "herääminen ei alkanut liikkeestä");
     CHECK(on >= welcome + LAMP_ANIM_MS && on <= welcome + LAMP_ANIM_MS + 200, "säätö ei jatkunut animaation jälkeen");
     CHECK(l.state == LAMP_ON, "lamppu ei ole päällä lopussa");
 }
 
-/* Animaation kuvio: herääminen keskeltä reunoille. */
+/* Animaation kuvio: valo leviää keskeltä reunoille ja kirkastuu pehmeästi. */
 static void test_animation(void) {
     Lamp l; lamp_init(&l, 0);
     l.level_pm = 500;
     lamp_start_anim(&l, LAMP_WELCOME, 0);
-    int lit_start = 0, lit_mid = 0, lit_end = 0;
+    int lit_start = 0, lit_mid = 0, full_end = 0;
     for (int i = 0; i < N_LEDS; i++) {
         lit_start += lamp_led_pm(&l, i, N_LEDS, 0) > 0;
         lit_mid += lamp_led_pm(&l, i, N_LEDS, LAMP_ANIM_MS / 2) > 0;
-        lit_end += lamp_led_pm(&l, i, N_LEDS, LAMP_ANIM_MS) > 0;
+        full_end += lamp_led_pm(&l, i, N_LEDS, LAMP_ANIM_MS) == 500;
     }
     int center = lamp_led_pm(&l, N_LEDS / 2, N_LEDS, LAMP_ANIM_MS / 2) > 0;
     int edge = lamp_led_pm(&l, 0, N_LEDS, LAMP_ANIM_MS / 2) > 0;
-    printf("heräämisanimaatio: palavia LEDejä alussa %d, puolivälissä %d, lopussa %d / %d\n",
-           lit_start, lit_mid, lit_end, N_LEDS);
-    CHECK(lit_start == 0 && lit_end == N_LEDS && lit_mid > 0 && lit_mid < N_LEDS, "kuvio ei etene");
+    printf("heräämisanimaatio: palavia LEDejä alussa %d, puolivälissä %d, lopussa täysin kirkkaita %d / %d\n",
+           lit_start, lit_mid, full_end, N_LEDS);
+    CHECK(lit_start == 0 && full_end == N_LEDS && lit_mid > 0 && lit_mid < N_LEDS, "kuvio ei etene");
     CHECK(center && !edge, "puolivälissä keskikohdan pitäisi palaa ja reunan ei");
+
+    /* Pehmeys: yksikään LED ei saa muuttua 20 ms:n ruutujen välillä paljon, ja nauhan
+       keskikirkkaus kasvaa koko ajan. Tulostetaan keskikirkkaus 5 s:n välein. */
+    int max_step = 0, monotonic = 1, prev_avg = -1;
+    printf("keskikirkkaus (%% animaation kirkkaudesta):");
+    for (uint32_t t = 0; t <= LAMP_ANIM_MS; t += 20) {
+        for (int i = 0; i < N_LEDS; i++) {
+            int step = lamp_led_pm(&l, i, N_LEDS, t + 20 > LAMP_ANIM_MS ? LAMP_ANIM_MS : t + 20) - lamp_led_pm(&l, i, N_LEDS, t);
+            if (abs(step) > max_step) max_step = abs(step);
+        }
+        int avg = lamp_display_pm(&l, N_LEDS, t);
+        if (avg < prev_avg) monotonic = 0;
+        prev_avg = avg;
+        if (t % 5000 == 0) printf(" %u s: %d", t / 1000, avg * 100 / 500);
+    }
+    printf("\nsuurin muutos yhdessä LEDissä 20 ms:ssa: %d promillea\n", max_step);
+    CHECK(max_step <= 5, "kirkkaus muuttuu liian jyrkästi");
+    CHECK(monotonic, "keskikirkkaus ei kasva tasaisesti");
+}
+
+/* Liike kesken sammumisen: herääminen jatkuu samasta kohdasta ilman hyppyä. */
+static void test_reverse(void) {
+    Lamp l; lamp_init(&l, 0);
+    l.level_pm = 600;
+    lamp_start_anim(&l, LAMP_GOODBYE, 0);
+    uint32_t t = LAMP_ANIM_MS / 3;
+    int before = lamp_display_pm(&l, N_LEDS, t);
+    lamp_step(&l, t, 1, 100);
+    int after = lamp_display_pm(&l, N_LEDS, t);
+    int later = lamp_display_pm(&l, N_LEDS, t + 2000);
+    printf("liike sammumisen kolmanneksella: kirkkaus %d -> %d promillea, 2 s myöhemmin %d\n", before, after, later);
+    CHECK(l.state == LAMP_WELCOME, "ei siirtynyt heräämiseen");
+    CHECK(abs(after - before) <= 2, "kirkkaus hyppäsi");
+    CHECK(later > after, "kirkkaus ei kasva heräämisessä");
 }
 
 int main(void) {
@@ -131,6 +165,7 @@ int main(void) {
     test_bright_room();
     test_presence();
     test_animation();
+    test_reverse();
     printf(failures ? "\n%d testiä epäonnistui\n" : "\nKaikki testit läpäisty\n", failures);
     return failures ? 1 : 0;
 }

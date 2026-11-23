@@ -11,8 +11,10 @@
  *
  * Toiminta (lamp_logic.h):
  *   - säätö pitää valoanturin lukeman tavoitteessa: LED-nauha on toimilaite
- *   - kun liikettä ei ole havaittu pitoaikaan (oletus 3 min), nauha sammuu animaatiolla
- *   - kun liike havaitaan uudelleen, nauha syttyy animaatiolla ja säätö jatkuu
+ *   - kun liikettä ei ole havaittu pitoaikaan (oletus 3 min), nauha sammuu 30 s:n
+ *     animaatiolla: LEDit himmenevät reunoilta kohti keskikohtaa
+ *   - kun liike havaitaan uudelleen, valo leviää keskeltä reunoille ja kirkastuu 30 s:ssa,
+ *     minkä jälkeen säätö jatkuu
  *
  * Lähettää viisi kertaa sekunnissa rivin
  *     pir,valo,kirkkaus,tavoite,tila,jannite_mV,virta_mA,teho_mW
@@ -155,7 +157,7 @@ static void send_telemetry(void) {
     }
     Serial.print(last_pir);                         Serial.print(',');
     Serial.print(lamp_light(&lamp));                Serial.print(',');
-    Serial.print((lamp_display_pm(&lamp) + 5) / 10); Serial.print(',');
+    Serial.print((lamp_display_pm(&lamp, NUM_LEDS, millis()) + 5) / 10); Serial.print(',');
     Serial.print(lamp.target);                      Serial.print(',');
     Serial.print(lamp.state);                       Serial.print(',');
     Serial.print(mv);                               Serial.print(',');

@@ -67,6 +67,7 @@ SEND_MIN_INTERVAL_S = 0.15   # liukusäätimen komentoja korkeintaan tällä vä
 RESEND_S = 1.0           # komento lähetetään uudelleen, jos Arduino ei ole ottanut sitä käyttöön
 DEFAULT_TARGET = 150     # tavoite valoanturin yksiköissä
 TARGET_MAX = 600         # liukusäätimen yläraja
+ANIM_S = 30.0            # animaation kesto (sama kuin firmwaren LAMP_ANIM_MS)
 STATE_NAMES = {0: "pois (ei liikettä)", 1: "säätö", 2: "sammumisanimaatio", 3: "heräämisanimaatio"}
 
 # Tumma teema
@@ -338,7 +339,7 @@ class DemoSim:
     def __init__(self, start):
         self.target, self.hold = DEFAULT_TARGET, 180.0
         self.level, self.state, self.light = 0.0, 1, 60.0
-        self.pir_until, self.last_motion, self.anim_end = 0.0, start, 0.0
+        self.pir_until, self.last_motion, self.anim_start, self.anim_level = 0.0, start, 0.0, 0.0
         self.present, self.switch_at = True, start + random.uniform(600, 2400)
 
     def command(self, line):
@@ -359,13 +360,23 @@ class DemoSim:
         if pir:
             self.last_motion = now
         if self.state == 1 and now - self.last_motion > self.hold:
-            self.state, self.anim_end = 2, now + 1.5
-        elif self.state in (0, 2) and pir:
-            self.state, self.anim_end = 3, now + 1.5
-        elif self.state in (2, 3) and now >= self.anim_end:
+            self.state, self.anim_start, self.anim_level = 2, now, self.level
+        elif self.state == 2 and pir:          # herääminen jatkuu samasta kohdasta
+            elapsed = min(now - self.anim_start, ANIM_S)
+            self.state, self.anim_start = 3, now - (ANIM_S - elapsed)
+        elif self.state == 0 and pir:
+            self.state, self.anim_start, self.anim_level = 3, now, max(self.level, 30.0)
+        elif self.state in (2, 3) and now - self.anim_start >= ANIM_S:
+            if self.state == 3:
+                self.level = self.anim_level
             self.state = 0 if self.state == 2 else 1
-        on = self.state != 0
-        shown = self.level if self.state == 1 else (max(self.level, 30.0) if on else 0.0)
+        if self.state == 1:
+            shown = self.level
+        elif self.state == 0:
+            shown = 0.0
+        else:
+            phase = min(now - self.anim_start, ANIM_S) / ANIM_S
+            shown = self.anim_level * anim_fraction(phase if self.state == 3 else 1 - phase)
         ambient = max(0.0, 80 + 45 * math.sin(now / 2400) + 8 * math.sin(now / 60))
         self.light += (ambient + 2.0 * shown + random.gauss(0, 2) - self.light) / 4
         if self.state == 1:
@@ -376,6 +387,18 @@ class DemoSim:
         mv = int(5000 - 0.1 * ma)
         return dict(pir=pir, light=int(max(0, min(ADC_MAX, self.light))), bright=int(round(shown)),
                     target=self.target, state=self.state, mv=mv, ma=ma, mw=int(mv * ma / 1000))
+
+
+def anim_fraction(phase, n=39, edge=0.4):
+    """Nauhan keskikirkkaus animaation vaiheessa 0–1 suhteessa animaation kirkkauteen
+    (sama muoto kuin firmwaren lamp_led_pm)."""
+    reach = phase * (1 + edge)
+    total = 0.0
+    for i in range(n):
+        d = abs(2 * i - (n - 1)) / (n - 1)
+        f = min(1.0, max(0.0, (reach - d) / edge))
+        total += f * f
+    return total / n
 
 
 def demo_reader(state, log, sim):

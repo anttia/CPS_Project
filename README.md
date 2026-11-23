@@ -1,6 +1,6 @@
 # CPS-projekti: luxanturin ohjaama lamppu
 
-Cyber-Physical Systems -kurssin lopputyö. Lamppu (osoitettava LED-nauha) pitää työpisteen valaistuksen tavoitearvossa valoanturin avulla: LED-nauha on toimilaite, jonka kirkkautta säädin muuttaa, kunnes anturin lukema on tavoitteessa. Kun liiketunnistin ei ole havainnut ketään pitoaikaan (oletus 3 min), nauha sammuu animaatiolla, ja kun liike havaitaan uudelleen, se syttyy animaatiolla. Mittausdata kulkee USB:n kautta PC:n dashboardille.
+Cyber-Physical Systems -kurssin lopputyö. Lamppu (osoitettava LED-nauha) pitää työpisteen valaistuksen tavoitearvossa valoanturin avulla: LED-nauha on toimilaite, jonka kirkkautta säädin muuttaa, kunnes anturin lukema on tavoitteessa. Kun liiketunnistin ei ole havainnut ketään pitoaikaan (oletus 3 min), nauha sammuu 30 sekunnin animaatiolla: LEDit himmenevät pehmeästi reunoilta kohti keskikohtaa. Kun liike havaitaan uudelleen, valo leviää 30 sekunnissa keskeltä reunoille ja kirkastuu, minkä jälkeen säätö jatkuu. Jos liike havaitaan kesken sammumisen, nauha alkaa kirkastua samasta kohdasta. Animaation kesto on `lamp_logic.h`:n vakio `LAMP_ANIM_MS`. Mittausdata kulkee USB:n kautta PC:n dashboardille.
 
 ## Rakenne
 
@@ -68,7 +68,7 @@ Sarjaportin nopeus on 9600 baudia (8N1).
 
 - `pir`: 1 kun liikettä havaitaan, muuten 0
 - `valo`: suodatettu valoanturin ADC-lukema 0–1023
-- `kirkkaus`: LED-nauhan nykyinen kirkkaus prosentteina
+- `kirkkaus`: LED-nauhan keskimääräinen kirkkaus prosentteina (animaation aikana kaikkien LEDien keskiarvo)
 - `tavoite`: säädön tavoite valoanturin yksiköissä
 - `tila`: 0 = pois, 1 = säätö, 2 = sammumisanimaatio, 3 = heräämisanimaatio
 - `jannite_mV`, `virta_mA`, `teho_mW`: INA219:n mittaama nauhan syöttö; -1, jos INA219 ei vastaa
