@@ -1,5 +1,6 @@
 /*
- * Luxlamppu: anturit, INA219-virtamittaus ja LED-nauhan kirkkaus USB-dashboardin kautta.
+ * Luxlamppu: valoanturi ohjaa LED-nauhaa suljetulla säädöllä, PIR sammuttaa ja
+ * sytyttää lampun animaatioilla, ja INA219 mittaa nauhan tehon.
  *
  * Kytkennät (Arduino Uno R3):
  *   Grove PIR    SIG -> D2           Grove Light  SIG -> A0
@@ -8,14 +9,20 @@
  *                VIN+ <- USB-breakoutin VBUS, VIN- -> LED-nauhan +5V
  *   Kaikkien osien GND yhteen (Arduino, USB-breakout, nauha, INA219).
  *
- * Lähettää viisi kertaa sekunnissa rivin
- *     pir,valo,kirkkaus,jannite_mV,virta_mA,teho_mW
- * esim. "1,182,40,4987,412,2050". Jos INA219 ei vastaa, sen kentät ovat -1.
+ * Toiminta (lamp_logic.h):
+ *   - säätö pitää valoanturin lukeman tavoitteessa: LED-nauha on toimilaite
+ *   - kun liikettä ei ole havaittu pitoaikaan (oletus 3 min), nauha sammuu animaatiolla
+ *   - kun liike havaitaan uudelleen, nauha syttyy animaatiolla ja säätö jatkuu
  *
- * Vastaanottaa dashboardilta komennon
- *     B,<0-100>        LED-kirkkaus prosentteina (valkoinen)
- * Lähetetty "kirkkaus" on se arvo, jolla nauha oikeasti palaa, joten dashboard
- * näkee, onko komento mennyt perille.
+ * Lähettää viisi kertaa sekunnissa rivin
+ *     pir,valo,kirkkaus,tavoite,tila,jannite_mV,virta_mA,teho_mW
+ * missä tila on 0 = pois, 1 = säätö, 2 = sammumisanimaatio, 3 = heräämisanimaatio.
+ * Jos INA219 ei vastaa, sen kentät ovat -1.
+ *
+ * Vastaanottaa dashboardilta komennot:
+ *     T,<0-1023>    tavoite valoanturin yksiköissä
+ *     H,<1-3600>    pitoaika sekunteina
+ *     K,<1-50>      säätimen kerroin (promillea kirkkautta per ADC-yksikkö per askel)
  *
  * "100 %" on suurin kirkkaus, jonka virtabudjetti CURRENT_LIMIT_MA sallii valkoiselle.
  *
@@ -25,14 +32,18 @@
  */
 #include <Wire.h>
 #include <Adafruit_INA219.h>
+#include "lamp_logic.h"
 
 #define NUM_LEDS          39     // nauhan LEDien määrä
 #define CURRENT_LIMIT_MA  900    // virtabudjetti nauhalle: USB-breakout ja vähintään 1 A:n laturi
+#define CONTROL_MS        100    // säätöväli
+#define FRAME_MS          20     // animaation päivitysväli
 #define SEND_INTERVAL_MS  200    // mittausrivi viisi kertaa sekunnissa
 
 static uint8_t leds[NUM_LEDS * 3];   // jokaiselle LEDille G, R, B
 static uint8_t max_level;            // valkoisen taso (0–255), joka vastaa 100 %
-static uint8_t brightness_pct = 0;   // nauhan nykyinen kirkkaus prosentteina
+static Lamp lamp;
+static uint8_t last_pir = 0;
 
 Adafruit_INA219 ina219;              // osoite 0x40
 static bool ina_ok = false;
@@ -73,12 +84,16 @@ static uint8_t compute_max_level(void) {
     return (uint8_t)((CURRENT_LIMIT_MA - idle_ma) * 255UL / (full_ma - idle_ma));
 }
 
-static void set_brightness(uint8_t pct) {
-    if (pct > 100) pct = 100;
-    uint8_t level = (uint16_t)pct * max_level / 100;
-    for (uint16_t i = 0; i < sizeof leds; i++) leds[i] = level;   // valkoinen: G = R = B
-    ws_show();
-    brightness_pct = pct;
+/* Piirtää nauhan lampun tilan mukaan. Palauttaa true, jos jokin LED muuttui. */
+static bool render(uint32_t now) {
+    bool changed = false;
+    for (uint16_t i = 0; i < NUM_LEDS; i++) {
+        uint8_t level = (uint32_t)lamp_led_pm(&lamp, i, NUM_LEDS, now) * max_level / 1000;
+        if (leds[3 * i] != level) changed = true;
+        leds[3 * i] = leds[3 * i + 1] = leds[3 * i + 2] = level;   // valkoinen: G = R = B
+    }
+    if (changed) ws_show();                   // nauha päivitetään vain muutoksista
+    return changed;
 }
 
 /* ---------- Valoanturi: ADC0 (A0) ---------- */
@@ -94,11 +109,21 @@ static uint16_t adc_read(void) {
     return ADC;
 }
 
+/* 32 näytteen keskiarvo noin 3,3 ms:n ajalta: tasoittaa LEDien oman PWM-välkkeen. */
+static uint16_t read_light(void) {
+    uint32_t sum = 0;
+    for (uint8_t i = 0; i < 32; i++) sum += adc_read();
+    return sum / 32;
+}
+
 /* ---------- Komennot dashboardilta ---------- */
 static void handle_command(const char *line) {
-    if (line[0] == 'B' && line[1] == ',') {
-        int pct = atoi(line + 2);
-        if (pct >= 0 && pct <= 100) set_brightness((uint8_t)pct);
+    if (line[1] != ',') return;
+    long v = atol(line + 2);
+    switch (line[0]) {
+    case 'T': if (v >= 0 && v <= 1023) lamp.target = (uint16_t)v; break;
+    case 'H': if (v >= 1 && v <= 3600) lamp.hold_ms = (uint32_t)v * 1000UL; break;
+    case 'K': if (v >= 1 && v <= 50) lamp.ki = (uint8_t)v; break;
     }
 }
 
@@ -121,6 +146,23 @@ static void read_serial(void) {
     }
 }
 
+static void send_telemetry(void) {
+    long mv = -1, ma = -1, mw = -1;
+    if (ina_ok) {
+        mv = lround(ina219.getBusVoltage_V() * 1000);
+        ma = lround(ina219.getCurrent_mA());
+        mw = lround(ina219.getPower_mW());
+    }
+    Serial.print(last_pir);                         Serial.print(',');
+    Serial.print(lamp_light(&lamp));                Serial.print(',');
+    Serial.print((lamp_display_pm(&lamp) + 5) / 10); Serial.print(',');
+    Serial.print(lamp.target);                      Serial.print(',');
+    Serial.print(lamp.state);                       Serial.print(',');
+    Serial.print(mv);                               Serial.print(',');
+    Serial.print(ma);                               Serial.print(',');
+    Serial.println(mw);
+}
+
 void setup() {
     Serial.begin(9600);
     DDRD |= (1 << PD6);                       // nauhan data lähdöksi
@@ -134,32 +176,27 @@ void setup() {
     Wire.setWireTimeout(25000, true);
 
     max_level = compute_max_level();
-    set_brightness(0);
+    lamp_init(&lamp, millis());
+    ws_show();                                // kaikki LEDit pois
 }
 
 void loop() {
-    static unsigned long last_send = 0;
+    static uint32_t last_control = 0, last_frame = 0, last_send = 0;
+    uint32_t now = millis();
     read_serial();
 
-    if (millis() - last_send < SEND_INTERVAL_MS) return;
-    last_send = millis();
-
-    uint8_t pir = (PIND & (1 << PD2)) ? 1 : 0;
-    uint16_t sum = 0;
-    for (uint8_t i = 0; i < 4; i++) sum += adc_read();   // neljän näytteen keskiarvo
-    uint16_t light = sum / 4;
-
-    long mv = -1, ma = -1, mw = -1;
-    if (ina_ok) {
-        mv = lround(ina219.getBusVoltage_V() * 1000);
-        ma = lround(ina219.getCurrent_mA());
-        mw = lround(ina219.getPower_mW());
+    if (now - last_control >= CONTROL_MS) {
+        last_control = now;
+        last_pir = (PIND & (1 << PD2)) ? 1 : 0;
+        lamp_step(&lamp, now, last_pir, read_light());
+        render(now);
     }
-
-    Serial.print(pir);            Serial.print(',');
-    Serial.print(light);          Serial.print(',');
-    Serial.print(brightness_pct); Serial.print(',');
-    Serial.print(mv);             Serial.print(',');
-    Serial.print(ma);             Serial.print(',');
-    Serial.println(mw);
+    if ((lamp.state == LAMP_GOODBYE || lamp.state == LAMP_WELCOME) && now - last_frame >= FRAME_MS) {
+        last_frame = now;
+        render(now);                          // animaatio etenee 50 kertaa sekunnissa
+    }
+    if (now - last_send >= SEND_INTERVAL_MS) {
+        last_send = now;
+        send_telemetry();
+    }
 }

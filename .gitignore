@@ -7,3 +7,5 @@ __pycache__/
 *.elf
 *.hex
 build/
+# Logiikkatestin käännös
+firmware/luxlamppu/test/test

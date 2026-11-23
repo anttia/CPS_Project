@@ -1,15 +1,17 @@
 # CPS-projekti: luxanturin ohjaama lamppu
 
-Cyber-Physical Systems -kurssin lopputyö. Lamppu (osoitettava LED-nauha) pitää työpisteen valaistuksen tavoitearvossa valoanturin avulla ja sammuu, kun liiketunnistin ei havaitse ketään. Mittausdata kulkee USB:n kautta PC:n dashboardille.
+Cyber-Physical Systems -kurssin lopputyö. Lamppu (osoitettava LED-nauha) pitää työpisteen valaistuksen tavoitearvossa valoanturin avulla: LED-nauha on toimilaite, jonka kirkkautta säädin muuttaa, kunnes anturin lukema on tavoitteessa. Kun liiketunnistin ei ole havainnut ketään pitoaikaan (oletus 3 min), nauha sammuu animaatiolla, ja kun liike havaitaan uudelleen, se syttyy animaatiolla. Mittausdata kulkee USB:n kautta PC:n dashboardille.
 
 ## Rakenne
 
 | Kansio | Sisältö |
 | --- | --- |
-| `firmware/luxlamppu/` | Arduino Uno R3: PIR, valoanturi, INA219-virtamittaus ja LED-nauhan kirkkaus dashboardin komennolla |
+| `firmware/luxlamppu/` | Arduino Uno R3: suljettu valon säätö, PIR-sammutus ja -herätys animaatioilla, INA219-virtamittaus |
+| `firmware/luxlamppu/lamp_logic.h` | lampun logiikka ilman laitteistoa: suodatus, I-säädin, tilakone, animaatiot |
+| `firmware/luxlamppu/test/` | logiikan testi PC:llä simuloidussa huoneessa |
 | `firmware/valo_liike_usb/` | varhainen testi: lukee vain PIR- ja valoanturin ja lähettää arvot USB:n kautta |
 | `firmware/cps_test_led_strip/` | LED-nauhan testi: kirkkaus 0–100 % ja värin vaihto, data D6:ssa, virtabudjetti asetettavissa |
-| `dashboard/` | PC-dashboard (Python): liike, valoisuus, LED-kirkkaus, jännite, virta, teho ja energia; kirkkauden ohjaus |
+| `dashboard/` | PC-dashboard (Python): liike, valoisuus, LED-kirkkaus, jännite, virta, teho ja energia; valoisuuden tavoitteen ja pitoajan asetus |
 
 ## Kytkennät (Arduino Uno R3)
 
@@ -39,7 +41,20 @@ Grove-johtojen valkoinen johdin (NC) jää kytkemättä. PIR:n jumpperi Re_trig-
    ```
    Sulje Arduino IDE:n Serial Monitor ennen dashboardin käynnistystä: sama portti ei voi olla auki kahdessa ohjelmassa. Jos portti on varattu, puuttuu tai data lakkaa tulemasta, dashboard näyttää punaisen ilmoituksen ja yhdistää automaattisesti uudelleen, kun portti vapautuu.
 
-Dashboardin alareunan liukusäädin asettaa LED-nauhan kirkkauden (0–100 %). Kaavion violetti käyrä on Arduinon ilmoittama todellinen kirkkaus; dashboard lähettää komennon uudelleen, jos Arduino ei ole ottanut sitä käyttöön (esim. Arduinon uudelleenkäynnistyksen jälkeen). "100 %" on suurin kirkkaus, jonka firmwaren virtabudjetti `CURRENT_LIMIT_MA` sallii valkoiselle.
+Dashboardin alareunan liukusäädin asettaa **tavoitteen valoanturin yksiköissä** (vihreä katkoviiva), ja Arduino säätää LED-nauhan kirkkautta (violetti käyrä) niin, että anturin lukema pysyy tavoitteessa. Painike "Käytä nykyistä lukemaa" asettaa tavoitteeksi anturin sen hetkisen lukeman. Dashboard lähettää tavoitteen ja pitoajan aina yhteyden alussa ja uudelleen, jos Arduinon ilmoittama tavoite ei vastaa liukusäädintä. "100 %" on suurin kirkkaus, jonka firmwaren virtabudjetti `CURRENT_LIMIT_MA` sallii valkoiselle.
+
+Pitoajan ja säätimen kertoimen voi antaa käynnistyksessä, esim. `python dashboard.py --pitoaika 20 --ki 3`. Lyhyt pitoaika on kätevä animaatioiden testaamiseen.
+
+## Logiikan testi
+
+Lampun logiikkaa (`lamp_logic.h`) voi testata PC:llä ilman Arduinoa simuloidussa huoneessa, jossa anturin lukema on taustavalo plus LEDin vaikutus:
+
+```
+cd firmware/luxlamppu/test
+gcc -std=c99 -Wall -Wextra -I.. test_lamp_logic.c -lm -o test && ./test
+```
+
+Testi tarkistaa, että säätö asettuu tavoitteeseen eri lampun vahvistuksilla värähtelemättä, palaa saavuttamattomasta tavoitteesta (anti-windup), sammuttaa lampun kirkkaassa huoneessa, ja että pitoaika ja animaatiot toimivat oikeaan aikaan.
 
 Dashboard tallentaa kaiken vastaanotetun datan tiedostoon `mittaus_<päivämäärä>.csv`.
 
@@ -47,13 +62,19 @@ Dashboard tallentaa kaiken vastaanotetun datan tiedostoon `mittaus_<päivämää
 
 Sarjaportin nopeus on 9600 baudia (8N1).
 
-**Arduino → PC**, viisi kertaa sekunnissa: `pir,valo,kirkkaus,jannite_mV,virta_mA,teho_mW`, esimerkiksi `1,182,40,4987,412,2050`.
+**Arduino → PC**, viisi kertaa sekunnissa: `pir,valo,kirkkaus,tavoite,tila,jannite_mV,virta_mA,teho_mW`, esimerkiksi `1,150,42,150,1,4987,412,2050`.
 
 - `pir`: 1 kun liikettä havaitaan, muuten 0
-- `valo`: valoanturin ADC-lukema 0–1023 (neljän näytteen keskiarvo)
+- `valo`: suodatettu valoanturin ADC-lukema 0–1023
 - `kirkkaus`: LED-nauhan nykyinen kirkkaus prosentteina
+- `tavoite`: säädön tavoite valoanturin yksiköissä
+- `tila`: 0 = pois, 1 = säätö, 2 = sammumisanimaatio, 3 = heräämisanimaatio
 - `jannite_mV`, `virta_mA`, `teho_mW`: INA219:n mittaama nauhan syöttö; -1, jos INA219 ei vastaa
 
-Dashboard ymmärtää myös vanhan muodon `pir,valo` (`firmware/valo_liike_usb`).
+Dashboard ymmärtää myös vanhat muodot `pir,valo` ja `pir,valo,kirkkaus,jannite_mV,virta_mA,teho_mW`.
 
-**PC → Arduino:** `B,<0-100>` asettaa LED-kirkkauden prosentteina.
+**PC → Arduino:**
+
+- `T,<0-1023>`: tavoite valoanturin yksiköissä
+- `H,<1-3600>`: pitoaika sekunteina
+- `K,<1-50>`: säätimen kerroin (promillea kirkkautta per ADC-yksikkö per 100 ms:n askel)
