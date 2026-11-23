@@ -37,7 +37,7 @@ Grove-johtojen valkoinen johdin (NC) jää kytkemättä. PIR:n jumpperi Re_trig-
    pip install -r requirements.txt
    python dashboard.py              # etsii Arduinon portin automaattisesti
    python dashboard.py --port COM3  # tai portti käsin
-   python dashboard.py --demo       # testidata ilman Arduinoa
+   python dashboard.py --demo       # testidata ilman Arduinoa (3 h valmiina historiana)
    ```
    Sulje Arduino IDE:n Serial Monitor ennen dashboardin käynnistystä: sama portti ei voi olla auki kahdessa ohjelmassa. Jos portti on varattu, puuttuu tai data lakkaa tulemasta, dashboard näyttää punaisen ilmoituksen ja yhdistää automaattisesti uudelleen, kun portti vapautuu.
 
@@ -56,7 +56,9 @@ gcc -std=c99 -Wall -Wextra -I.. test_lamp_logic.c -lm -o test && ./test
 
 Testi tarkistaa, että säätö asettuu tavoitteeseen eri lampun vahvistuksilla värähtelemättä, palaa saavuttamattomasta tavoitteesta (anti-windup), sammuttaa lampun kirkkaassa huoneessa, ja että pitoaika ja animaatiot toimivat oikeaan aikaan.
 
-Dashboard tallentaa kaiken vastaanotetun datan tiedostoon `mittaus_<päivämäärä>.csv`.
+Dashboard tallentaa kaiken vastaanotetun datan tiedostoon `mittaus_<päivämäärä>.csv` (demossa `demo_<päivämäärä>.csv`).
+
+**Aikaväli:** kaavioiden aikavälin voi valita painikkeilla 2 min, 15 min, 1 h, 3 h tai 12 h. Tunnin ja sitä pidemmillä aikaväleillä kaaviot näyttävät 10 sekunnin jaksojen keskiarvot, ja tehokaavion vaalea alue näyttää jakson pienimmän ja suurimman tehon. Tehokaavion kulmassa on näkyvän jakson keskiteho, suurin teho ja energia. Dashboard lataa käynnistyessään saman kansion `mittaus_*.csv`-tiedostoista viimeisten 12 tunnin mittaukset, joten historia säilyy uudelleenkäynnistyksen yli (`--ei-historiaa` ohittaa latauksen). Katkot mittauksissa näkyvät katkoina käyrissä.
 
 ## Viestimuoto
 
