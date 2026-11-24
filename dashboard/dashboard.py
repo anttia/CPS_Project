@@ -22,6 +22,13 @@ kirkkautta niin, että anturin lukema pysyy tavoitteessa. Dashboard lähettää
 tavoitteen (T), pitoajan (H) ja tarvittaessa säätimen kertoimen (K) aina, kun
 yhteys avataan, ja uudelleen, jos Arduinon ilmoittama tavoite ei vastaa liukusäädintä.
 
+Ikkunassa on kaksi välilehteä. "Lamppu" näyttää yllä kuvatut kaaviot. "Järjestelmä"
+näyttää firmwaren omat ajoitusmittarit: dashboard kytkee ne päälle komennolla D,1, ja
+Arduino lähettää kerran sekunnissa rivin
+    #diag,tikit,ohitetut,suurin_viive_us,kuorma_promillea[,pir_liikkeet,pir_viive_max_us]
+Välilehdellä näkyvät suoritinkuorma ja suurin viive tikistä työhön ajan funktiona,
+ohitetut tikit, PIR:n viive (jos firmware mittaa sen), telemetrian tahti ja firmwaren versio.
+
 Jos sarjaporttia ei saada auki tai data lakkaa tulemasta, dashboard näyttää siitä
 punaisen ilmoituksen ja yrittää yhdistää uudelleen automaattisesti.
 
@@ -55,7 +62,7 @@ from collections import deque
 from datetime import datetime
 
 import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
+from matplotlib.figure import Figure
 from matplotlib.patches import Patch
 from matplotlib.widgets import Button, Slider
 
@@ -81,6 +88,11 @@ STOP_WAIT_S = 10         # kuinka kauan "stop" odottaa dashboardin sulkeutumista
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mittaukset")
                          # mittauslokit (mittaus_*.csv, demo_*.csv) dashboardin alakansiossa,
                          # riippumatta siitä, mistä kansiosta dashboard käynnistetään
+DIAG_WINDOW_S = 600      # Järjestelmä-välilehden kaavioiden aikaväli (10 min)
+DIAG_STALE_S = 5         # näin kauan ilman #diag-riviä: firmware ei lähetä niitä
+TICK_MS = 10             # firmwaren Timer1-tikki
+LOAD_COLOR = "#38bdf8"
+LATENCY_COLOR = "#fbbf24"
 STATE_NAMES = {0: "pois (ei liikettä)", 1: "säätö", 2: "sammumisanimaatio", 3: "heräämisanimaatio"}
 
 # Tumma teema
@@ -132,6 +144,7 @@ class State:
         self.need_config = False     # uusi yhteys: lähetä kaikki asetukset
         self.write = None            # funktio, joka lähettää rivin Arduinolle
         self.stop_requested = threading.Event()   # "dashboard.py stop" pyysi sulkemaan
+        self.diag = deque(maxlen=3600)  # (aika, tikit, ohitetut, viive_us, kuorma_pm, pir_n, pir_viive_us)
 
     def add(self, t, sample, history=False):
         """Lisää näytteen. history=True: näyte on ladattu aiemmasta mittauksesta, joten se
@@ -237,6 +250,18 @@ class State:
         with self.lock:
             self.desired = int(value)
 
+    def add_diag(self, t, diag):
+        with self.lock:
+            self.diag.append((t,) + diag)
+
+    def system_snapshot(self, now):
+        """Järjestelmä-välilehden tiedot: #diag-rivit ja telemetrian tahti."""
+        with self.lock:
+            diag = [d for d in self.diag if d[0] >= now - DIAG_WINDOW_S]
+            recent = sum(1 for t in reversed(self.times) if t >= now - 10)
+            return dict(diag=diag, firmware=self.firmware, latest=self.latest,
+                        connected_at=self.connected_at, rate=recent / 10.0)
+
     def snapshot(self, now):
         with self.lock:
             return dict(view=self._view(now), range_s=self.range_s, latest=self.latest,
@@ -272,6 +297,21 @@ def parse_line(line):
         return None
     sample.update(bright=bright, target=target, state=state, mv=mv, ma=ma, mw=mw)
     return sample
+
+
+def parse_diag(line):
+    """'#diag,1200,0,12,41[,3,152]' -> (tikit, ohitetut, viive_us, kuorma_pm, pir_n, pir_viive_us).
+    PIR-kentät ovat None, jos firmware ei lähetä niitä. Rikkinäinen rivi -> None."""
+    parts = line.strip().split(",")
+    if parts[0] != "#diag" or len(parts) not in (5, 7):
+        return None
+    try:
+        values = [int(p) for p in parts[1:]]
+    except ValueError:
+        return None
+    if len(values) == 4:
+        values += [None, None]
+    return tuple(values)
 
 
 def explain_open_error(port, message):
@@ -338,6 +378,11 @@ def serial_reader(port, baud, state, log):
                     if v >= 0:
                         with state.lock:
                             state.firmware = raw[v + 2:].strip()   # firmwaren käännösaika
+                        continue
+                    if raw.startswith("#diag"):
+                        diag = parse_diag(raw)
+                        if diag:
+                            state.add_diag(time.time(), diag)
                         continue
                     sample = parse_line(raw)
                     if sample is None:
@@ -478,11 +523,24 @@ def anim_fraction(phase, n=39, edge=0.4):
 
 def demo_reader(state, log, sim):
     state.set_connection("Demotila: testidata", connected=True, write=sim.command)
+    with state.lock:
+        state.firmware = "demo"
+    start, next_diag, pir_n, pir_max, last_pir = time.time(), time.time() + 1, 0, 0, 0
     while True:
         now = time.time()
         sample = sim.step(now)
         state.add(now, sample)
         log_sample(log, now, sample)
+        if sample["pir"] and not last_pir:          # simuloitu PIR-viive liikkeen alussa
+            pir_n += 1
+            pir_max = max(pir_max, random.randint(50, 9500))
+        last_pir = sample["pir"]
+        if now >= next_diag:                        # simuloitu #diag-rivi kerran sekunnissa
+            anim = sample["state"] in (2, 3)
+            load = random.randint(250, 360) if anim else random.randint(35, 50)
+            lat = random.randint(800, 2500) if anim else random.randint(12, 40)
+            state.add_diag(now, (int((now - start) * 100), 0, lat, load, pir_n, pir_max))
+            next_diag += 1
         time.sleep(0.2)
 
 
@@ -587,10 +645,9 @@ def style_axis(ax):
 
 def build_figure(state):
     plt.style.use("dark_background")
-    fig, (ax_info, ax, ax_p) = plt.subplots(3, 1, figsize=(9.5, 9.2),
-                                            gridspec_kw={"height_ratios": [1.4, 3, 1.8]})
+    fig = Figure(figsize=(9.5, 9.2))
+    ax_info, ax, ax_p = fig.subplots(3, 1, gridspec_kw={"height_ratios": [1.4, 3, 1.8]})
     fig.patch.set_facecolor(BG)
-    fig.canvas.manager.set_window_title("Luxlamppu - dashboard")
     fig.subplots_adjust(left=0.09, right=0.91, top=0.97, bottom=0.225, hspace=0.35)
 
     ax_info.axis("off")
@@ -701,6 +758,7 @@ def sync_settings(state, snap, now):
     want = snap["desired"]
     try:
         if state.need_config:
+            state.write("D,1")                # ajoitusmittarit Järjestelmä-välilehdelle
             state.write(f"H,{state.hold_s}")
             if state.ki is not None:
                 state.write(f"K,{state.ki}")
@@ -720,14 +778,10 @@ def sync_settings(state, snap, now):
 def make_updater(state, ax, ax_b, ax_p, art):
     fills = {"motion": None, "band": None}
 
-    def update(_frame):
-        if state.stop_requested.is_set():
-            plt.close(ax.figure)      # plt.show() palaa ja main() sulkee lokin
-            return []
+    def update():
         now = time.time()
         s = state.snapshot(now)
         v, span = s["view"], s["range_s"]
-        sync_settings(state, s, now)
         latest = s["latest"]
         rel = [t - now for t in v["t"]]
         gap = v["gap"]
@@ -811,7 +865,96 @@ def make_updater(state, ax, ax_b, ax_p, art):
         art["error"].set_visible(error is not None)
         if error is not None:
             art["error"].set_text(error)
-        return []
+
+    return update
+
+
+def build_system_figure():
+    """Järjestelmä-välilehti: firmwaren ajoitusmittarit (#diag-rivit)."""
+    fig = Figure(figsize=(9.5, 9.2))
+    ax_info, ax_load, ax_lat = fig.subplots(3, 1, gridspec_kw={"height_ratios": [1.6, 2.2, 2.2]})
+    fig.patch.set_facecolor(BG)
+    fig.subplots_adjust(left=0.09, right=0.91, top=0.97, bottom=0.07, hspace=0.4)
+    ax_info.axis("off")
+    art = {}
+    art["title"] = ax_info.text(0.0, 0.95, "Firmwaren ajoitus ja kuorma", fontsize=14,
+                                fontweight="bold", color=TEXT, transform=ax_info.transAxes)
+    for i, key in enumerate(["line1", "line2", "line3", "line4", "line5"]):
+        art[key] = ax_info.text(0.0, 0.72 - i * 0.19, "", fontsize=11.5, color=TEXT,
+                                transform=ax_info.transAxes)
+    art["note"] = ax_info.text(0.0, -0.22, "", fontsize=9, color=MUTED, transform=ax_info.transAxes)
+
+    style_axis(ax_load)
+    (art["load"],) = ax_load.plot([], [], color=LOAD_COLOR, linewidth=1.6)
+    ax_load.set_xlim(-DIAG_WINDOW_S / 60, 0)
+    ax_load.set_ylim(0, 100)
+    ax_load.set_ylabel("suoritinkuorma (%)", color=MUTED)
+    ax_load.set_title("Kuinka suuren osan ajasta pääsilmukka tekee työtä (loput on odotusta)",
+                      fontsize=10, color=MUTED, loc="left")
+
+    style_axis(ax_lat)
+    (art["latency"],) = ax_lat.plot([], [], color=LATENCY_COLOR, linewidth=1.6,
+                                    drawstyle="steps-post", label="suurin viive tikistä työhön")
+    art["limit"] = ax_lat.axhline(TICK_MS, color=ERROR_EDGE, linewidth=1.2, linestyle="--",
+                                  label=f"raja: yksi tikki ({TICK_MS} ms)")
+    ax_lat.set_xlim(-DIAG_WINDOW_S / 60, 0)
+    ax_lat.set_ylim(0, TICK_MS * 1.3)
+    ax_lat.set_ylabel("viive (ms)", color=MUTED)
+    ax_lat.set_xlabel("aika (min, 0 = nyt)", color=MUTED)
+    ax_lat.legend(loc="upper left", facecolor=PANEL, edgecolor=GRID, labelcolor=TEXT, fontsize=9)
+    return fig, ax_load, ax_lat, art
+
+
+def make_system_updater(state, ax_load, ax_lat, art):
+    def update():
+        now = time.time()
+        s = state.system_snapshot(now)
+        diag = s["diag"]
+        rel = [(d[0] - now) / 60 for d in diag]
+        art["load"].set_data(rel, [d[4] / 10 for d in diag])
+        lat_ms = [d[3] / 1000 for d in diag]
+        art["latency"].set_data(rel, lat_ms)
+        ax_lat.set_ylim(0, max(TICK_MS * 1.3, max(lat_ms, default=0) * 1.2))
+
+        art["line1"].set_text(f"Firmware käännetty: {s['firmware'] or '–'}    "
+                              f"Telemetria: {fmt_num(s['rate'], 1)} riviä/s (tavoite 5)")
+        fresh = diag and now - diag[-1][0] <= DIAG_STALE_S
+        if not diag or not fresh:
+            waited = s["connected_at"] is not None and now - s["connected_at"] > DIAG_STALE_S
+            for key in ("line2", "line3", "line4"):
+                art[key].set_text("")
+            art["line2"].set_text("Ajoitusmittareita (#diag) ei tule." if waited else
+                                  "Odotetaan ajoitusmittareita...")
+            art["line3"].set_text("Firmware on vanhempi kuin Timer1-versio tai ei tue D-komentoa."
+                                  if waited else "")
+        else:
+            last = diag[-1]
+            missed = last[2] - diag[0][2]
+            loads = [d[4] / 10 for d in diag]
+            art["line2"].set_text(f"Timer1-tikki {TICK_MS} ms:    ohitetut tikit {missed} kpl, "
+                                  f"suurin viive tikistä työhön {fmt_num(max(lat_ms), 2)} ms "
+                                  f"(viimeiset {max(1, round((last[0] - diag[0][0]) / 60))} min)")
+            art["line3"].set_text(f"Suoritinkuorma: nyt {fmt_num(loads[-1], 1)} %, keskiarvo "
+                                  f"{fmt_num(sum(loads) / len(loads), 1)} %, suurin "
+                                  f"{fmt_num(max(loads), 1)} %  ->  vapaata "
+                                  f"{fmt_num(100 - sum(loads) / len(loads), 1)} %, "
+                                  "jonka unitila voi korvata")
+            if last[5] is None:
+                art["line4"].set_text("PIR-viive: firmware ei vielä mittaa sitä")
+            else:
+                art["line4"].set_text(f"PIR-viive liikkeestä käsittelyyn: suurin "
+                                      f"{fmt_num(last[6] / 1000, 2)} ms, liikkeitä {last[5]} "
+                                      "(käynnistyksestä)")
+        latest = s["latest"]
+        if latest is None or latest["mw"] is None:
+            ina = "ei tietoa"
+        elif latest["mw"] < 0:
+            ina = "ei vastaa"
+        else:
+            ina = "toimii"
+        art["line5"].set_text(f"INA219: {ina}")
+        art["note"].set_text("Mittarit laskee firmware itse Timer1:n 4 µs:n tarkkuudella ja lähettää "
+                             "kerran sekunnissa. Virallinen todiste: validointi/validoi_ajoitus.py.")
 
     return update
 
@@ -880,12 +1023,56 @@ def main():
         target, targs = serial_reader, (port, args.baud, state, log)
     threading.Thread(target=target, args=targs, daemon=True).start()
 
-    fig, ax, ax_b, ax_p, art = build_figure(state)
-    connect_controls(state, art)
-    update = make_updater(state, ax, ax_b, ax_p, art)
-    _anim = FuncAnimation(fig, update, interval=int(args.paivitys * 1000), cache_frame_data=False)
-    plt.show()
+    run_window(state, args.paivitys)
     logfile.close()
+
+
+def run_window(state, interval_s):
+    """Ikkuna, jossa on välilehdet Lamppu ja Järjestelmä. Vain näkyvä välilehti piirretään."""
+    import tkinter as tk
+    from tkinter import ttk
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+    root = tk.Tk()
+    root.title("Luxlamppu - dashboard")
+    root.configure(bg=BG)
+    style = ttk.Style(root)
+    style.theme_use("clam")
+    style.configure("TNotebook", background=BG, borderwidth=0)
+    style.configure("TNotebook.Tab", background=PANEL, foreground=MUTED, padding=(14, 6))
+    style.map("TNotebook.Tab", background=[("selected", GRID)], foreground=[("selected", TEXT)])
+    notebook = ttk.Notebook(root)
+    notebook.pack(fill="both", expand=True)
+
+    tabs = []
+    fig, ax, ax_b, ax_p, art = build_figure(state)
+    sys_fig, ax_load, ax_lat, sys_art = build_system_figure()
+    for name, figure, updater in (
+            ("Lamppu", fig, make_updater(state, ax, ax_b, ax_p, art)),
+            ("Järjestelmä", sys_fig, make_system_updater(state, ax_load, ax_lat, sys_art))):
+        frame = tk.Frame(notebook, bg=BG)
+        notebook.add(frame, text=name)
+        canvas = FigureCanvasTkAgg(figure, master=frame)
+        canvas.get_tk_widget().pack(fill="both", expand=True)
+        tabs.append((canvas, updater))
+    connect_controls(state, art)      # liukusäädin ja painike tarvitsevat kaavion piirtoalustan
+
+    def tick():
+        if state.stop_requested.is_set():
+            root.destroy()            # mainloop palaa ja main() sulkee lokin
+            return
+        now = time.time()
+        sync_settings(state, state.snapshot(now), now)   # myös silloin, kun Lamppu ei ole näkyvissä
+        canvas, updater = tabs[notebook.index("current")]
+        updater()
+        canvas.draw_idle()
+        root.after(int(interval_s * 1000), tick)
+
+    notebook.bind("<<NotebookTabChanged>>", lambda _e: (tabs[notebook.index("current")][1](),
+                                                         tabs[notebook.index("current")][0].draw_idle()))
+    root.protocol("WM_DELETE_WINDOW", root.destroy)
+    root.after(100, tick)
+    root.mainloop()
 
 
 if __name__ == "__main__":

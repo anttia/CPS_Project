@@ -187,6 +187,27 @@ static void test_render_matches(void) {
     printf("  verrattu %ld LED-arvoa\n", compared);
 }
 
+/* lamp_motion(): PIR:n keskeytys herättää lampun heti, ilman säätöaskelta. */
+static void test_motion_event(void) {
+    Lamp l; lamp_init(&l, 0);
+    l.hold_ms = 30000;
+    l.state = LAMP_OFF;
+    lamp_motion(&l, 5000);
+    printf("liike pimeässä: tila %u, animaatio alkoi %lu ms\n", l.state, (unsigned long)l.anim_start_ms);
+    CHECK(l.state == LAMP_WELCOME && l.anim_start_ms == 5000, "pimeä lamppu ei alkanut herätä heti");
+
+    lamp_init(&l, 0);
+    l.hold_ms = 30000;
+    lamp_motion(&l, 25000);                         // säätötilassa liike vain nollaa pitoajan
+    lamp_step(&l, 50000, 0, 100);
+    CHECK(l.state == LAMP_ON, "pitoaika ei alkanut alusta liikkeestä");
+    lamp_step(&l, 55100, 0, 100);
+    CHECK(l.state == LAMP_GOODBYE, "sammuminen ei alkanut pitoajan jälkeen");
+
+    lamp_motion(&l, 56000);                         // sammumisen aikana liike kääntää animaation
+    CHECK(l.state == LAMP_WELCOME, "sammuva lamppu ei alkanut herätä");
+}
+
 int main(void) {
     srand(1);
     double gains[] = {0.5, 1.0, 2.0, 4.0, 6.0};
@@ -197,6 +218,7 @@ int main(void) {
     test_animation();
     test_reverse();
     test_render_matches();
+    test_motion_event();
     printf(failures ? "\n%d testiä epäonnistui\n" : "\nKaikki testit läpäisty\n", failures);
     return failures ? 1 : 0;
 }

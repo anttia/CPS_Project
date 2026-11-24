@@ -6,7 +6,7 @@ Cyber-Physical Systems -kurssin lopputyö. Lamppu (osoitettava LED-nauha) pitä�
 
 | Kansio | Sisältö |
 | --- | --- |
-| `firmware/luxlamppu/` | Arduino Uno R3: suljettu valon säätö, PIR-sammutus ja -herätys animaatioilla, INA219-virtamittaus, ajoitus omalla Timer1-keskeytyksellä |
+| `firmware/luxlamppu/` | Arduino Uno R3: suljettu valon säätö, PIR-sammutus ja -herätys animaatioilla, INA219-virtamittaus, ajoitus omalla Timer1-keskeytyksellä, PIR pin change -keskeytyksellä |
 | `firmware/luxlamppu/lamp_logic.h` | lampun logiikka ilman laitteistoa: suodatus, I-säädin, tilakone, animaatiot |
 | `firmware/luxlamppu/test/` | logiikan testi PC:llä simuloidussa huoneessa |
 | `firmware/valo_liike_usb/` | varhainen testi: lukee vain PIR- ja valoanturin ja lähettää arvot USB:n kautta |
@@ -52,6 +52,8 @@ Grove-johtojen valkoinen johdin (NC) jää kytkemättä. PIR:n jumpperi Re_trig-
    `stop` lähettää käskyn käynnissä olevalle dashboardille paikallisen TCP-portin 47219 kautta ja odottaa, että se on sulkeutunut. Sen jälkeen sarjaportti on vapaa, esimerkiksi firmwaren lataamiseen.
    Sulje Arduino IDE:n Serial Monitor ennen dashboardin käynnistystä: sama portti ei voi olla auki kahdessa ohjelmassa. Jos portti on varattu, puuttuu tai data lakkaa tulemasta, dashboard näyttää punaisen ilmoituksen ja yhdistää automaattisesti uudelleen, kun portti vapautuu.
 
+Dashboardissa on kaksi välilehteä. **Lamppu** näyttää valoisuuden, tavoitteen, LED-kirkkauden, liikkeen ja tehon. **Järjestelmä** näyttää firmwaren omat ajoitusmittarit: suoritinkuorman ja suurimman viiveen tikistä työhön ajan funktiona (10 min), ohitetut tikit, PIR:n viiveen (kun firmware mittaa sen), telemetrian tahdin, firmwaren version ja INA219:n tilan. Dashboard kytkee mittarit päälle komennolla `D,1` aina yhteyden alussa. Vanha firmware ei lähetä niitä, ja välilehti kertoo sen. Virallinen todiste ajoituksesta on edelleen `validointi/validoi_ajoitus.py` (ks. [VALIDOINTI.md](VALIDOINTI.md)).
+
 Dashboardin alareunan liukusäädin asettaa **tavoitteen valoanturin yksiköissä** (vihreä katkoviiva), ja Arduino säätää LED-nauhan kirkkautta (violetti käyrä) niin, että anturin lukema pysyy tavoitteessa. Painike "Käytä nykyistä lukemaa" asettaa tavoitteeksi anturin sen hetkisen lukeman. Dashboard lähettää tavoitteen ja pitoajan aina yhteyden alussa ja uudelleen, jos Arduinon ilmoittama tavoite ei vastaa liukusäädintä. "100 %" on suurin kirkkaus, jonka firmwaren virtabudjetti `CURRENT_LIMIT_MA` sallii valkoiselle.
 
 Pitoajan ja säätimen kertoimen voi antaa käynnistyksessä, esim. `python dashboard.py --pitoaika 20 --ki 3`. Lyhyt pitoaika on kätevä animaatioiden testaamiseen.
@@ -78,11 +80,25 @@ Keskeytysrutiini on käännettynä 29 käskyä, noin 62 kellojaksoa vasteaikoine
 
 Timer1:n uudelleenkäyttö tarkoittaa, että `analogWrite` D9:ssä ja D10:ssä ei toimi. Arduinon Timer0 jää toistaiseksi käyntiin, koska Wire-kirjaston aikakatkaisu käyttää sitä.
 
+## PIR: pin change -keskeytys
+
+PIR:iä ei lueta pollaamalla. Pinnin D2 (PD2 = PCINT18) muutos käynnistää keskeytysrutiinin `ISR(PCINT2_vect)`, joka lukee pinnin tason ja kirjaa vain nousevan reunan eli liikkeen alun (`volatile`-lippu). Pääsilmukka lukee ja nollaa lipun `ATOMIC_BLOCK`issa ja herättää lampun (`lamp_motion()`) seuraavalla 10 ms:n tikillä. Pollauksella liike huomattiin vasta 100 ms:n säätöaskeleella.
+
+| Rekisteri | Arvo | Bitit ja syy |
+| --- | --- | --- |
+| DDRD | PD2 = 0 | D2 sisääntuloksi |
+| PORTD | PD2 = 0 | ei sisäistä ylösvetoa: Grove PIR ajaa linjaa itse |
+| PCMSK2 | PCINT18 = 1 | ryhmästä 2 (PORTD) vain D2 aiheuttaa keskeytyksen |
+| PCIFR | PCIF2 = 1 | vanha lippu nollataan kirjoittamalla 1 ennen ryhmän sallimista |
+| PCICR | PCIE2 = 1 | pin change -ryhmä 2 päälle |
+
+Pin change laukeaa molemmista reunoista, joten rutiini tarkistaa pinnin tason. Se valittiin INT0:n sijaan, koska Power-down-unesta herättää vain pin change tai INT0:n tasolaukaisu, ja PIR:n lepotaso on matala. Keskeytysrutiini on käännettynä 20 käskyä.
+
 ## Validointi
 
 Jokaisella firmwaren muutoksella on laudalla tehtävä testi ja mittari, joka näyttää muutoksen hyödyn. Ne on kuvattu tiedostossa [VALIDOINTI.md](VALIDOINTI.md), ja skriptit ovat kansiossa `validointi/`. PR yhdistetään päähaaraan vasta laudalla tehdyn testin jälkeen.
 
-Pinni D8 on varattu tikkimerkille: se vaihtaa tilaansa jokaisessa Timer1-keskeytyksessä (50 Hz).
+Pinni D8 on varattu tikkimerkille: se vaihtaa tilaansa jokaisessa Timer1-keskeytyksessä (50 Hz). Pinni D7 on liikemerkki: se nousee, kun pääsilmukka on käsitellyt PIR:n nousevan reunan, ja laskee, kun PIR:n signaali laskee.
 
 ## Logiikan testi
 
@@ -119,4 +135,4 @@ Dashboard ymmärtää myös vanhat muodot `pir,valo` ja `pir,valo,kirkkaus,janni
 - `T,<0-1023>`: tavoite valoanturin yksiköissä
 - `H,<1-3600>`: pitoaika sekunteina
 - `K,<1-50>`: säätimen kerroin (promillea kirkkautta per ADC-yksikkö per 100 ms:n askel)
-- `D,<0|1>`: ajoituksen validointirivi pois/päälle. Päällä ollessa Arduino lähettää kerran sekunnissa rivin `#diag,tikit,ohitetut,suurin_viive_us,kuorma_promillea`, jonka dashboard ohittaa (ks. [VALIDOINTI.md](VALIDOINTI.md))
+- `D,<0|1>`: ajoituksen validointirivi pois/päälle. Päällä ollessa Arduino lähettää kerran sekunnissa rivin `#diag,tikit,ohitetut,suurin_viive_us,kuorma_promillea`, jonka dashboard näyttää Järjestelmä-välilehdellä (ks. [VALIDOINTI.md](VALIDOINTI.md)). Dashboard ymmärtää myös kaksi lisäkenttää `pir_liikkeet,pir_viive_max_us`, kun firmware mittaa PIR:n viiveen.
