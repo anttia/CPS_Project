@@ -1,0 +1,69 @@
+# Validointi
+
+Jokaisen firmwaren muutoksen testi todistaa kaksi asiaa erikseen:
+
+1. **Muutos toimii niin kuin pitää.** Laudalla tehdään askeleet, joilla on numeeriset hyväksymiskriteerit.
+2. **Muutoksesta on hyötyä laitteelle.** Sama mittaus tehdään **ennen** (päähaaran firmware) ja **jälkeen** (PR:n firmware), ja ero kirjataan numeroina. Jos hyötyä ei voi vielä mitata laitteen toiminnasta, sanotaan suoraan, mitä muutos mahdollistaa ja millä mittauksella se todennetaan myöhemmin.
+
+Ennen laudalla tehtävää testiä muutos tarkistetaan kahdella tavalla. Logiikka testataan PC:llä (`firmware/luxlamppu/test/`). Firmware ajetaan simulaattorissa (simavr), kun se on mahdollista. **PR:ää ei yhdistetä päähaaraan ennen kuin se on testattu laudalla.** Laudalla testaaja kirjaa tulokset PR:ään ja raportin validointitaulukkoon (luku 5.5).
+
+Kaikki validointityökalut ovat kansiossa `validointi/`. Jokaisella skriptillä on oma testinsä, jonka voi ajaa ilman laitetta.
+
+---
+
+## Konsepti 1: Timer1-tikki ja keskeytys (PR #1)
+
+**Mitä muuttui:** ajoitus tulee Timer1:n 10 ms:n vertailukeskeytyksestä eikä Arduinon `millis()`-funktiosta. Keskeytysrutiini kasvattaa `volatile`-laskuria, ja pääsilmukka lukee laskurin atomisesti.
+
+**Mittarit firmwaressa:**
+- Komento `D,1` kytkee päälle rivin `#diag,tikit,ohitetut,suurin_viive_us,kuorma_promillea`, joka lähetetään kerran sekunnissa. `D,0` kytkee sen pois. Dashboard ohittaa #-rivit.
+  - *ohitetut:* kuinka monta kertaa pääsilmukka ei ehtinyt käsitellä tikkiä ennen seuraavaa
+  - *suurin_viive_us:* suurin aika tikistä siihen, kun pääsilmukka alkaa käsitellä sitä. Aika mitataan TCNT1:stä 4 µs:n tarkkuudella.
+  - *kuorma:* kuinka suuren osan ajasta pääsilmukka tekee työtä. Loppu on odotusta.
+- Pinni **D8 (PB0)** vaihtaa tilaansa jokaisessa keskeytyksessä. Tuloksena on 50 Hz:n kanttiaalto, jossa 10 ms on ylhäällä ja 10 ms alhaalla.
+
+### 1) Toimii: laudalla tehtävät askeleet
+
+| # | Askel | Hyväksytty, kun |
+| --- | --- | --- |
+| 1 | Lataa PR:n firmware. Käynnistä dashboard ja seuraa sitä 2 min. | Data päivittyy tasaisesti (5 riviä/s), eikä punaista ilmoitusta tule. Tavoitteen liukusäädin muuttaa LEDien kirkkautta. |
+| 2 | Sulje dashboard. Aja `python validointi/validoi_ajoitus.py --kesto 600 --pitoaika 20`. Pysy ensin poissa PIR:n näkyvistä, kunnes nauha on sammunut, ja palaa sitten. Toista koko mittauksen ajan (noin 1 min jaksoissa). Tallenna tuloste nimellä `jalkeen.txt`. | `KAIKKI KRITEERIT TÄYTTYVÄT`: tikin taajuus 100 Hz ± 0,5 %, telemetria 5 riviä/s ± 2 %, 0 ohitettua tikkiä ja suurin viive alle 10 ms. |
+| 3 | Mittaa sekuntikellolla sammumisanimaation kesto (pitoaika on edelleen 20 s). | 30 s ± 1 s |
+| 4 | Mittaa D8:n taajuus yleismittarin Hz-asteikolla tai oskilloskoopilla (maa GND:hen). | 50,0 Hz ± 0,5 %. Skoopilla jakso on 20 ms ja pulssisuhde 50 %. |
+| 5 | Paina Unon reset-nappia, jolloin pitoaika palaa 180 s:iin. | – |
+
+Skripti tallentaa raakalokin tiedostoon `validointi_ajoitus_<pvm>.log`. Lokin voi analysoida uudelleen komennolla `--tiedosto`.
+
+### 2) Hyöty: ennen/jälkeen
+
+**Laudalla:** lataa päähaaran (`main`) firmware ja toista askel 2 samalla tavalla. Vanhassa firmwaressa ei ole #diag-rivejä, joten skripti ilmoittaa niistä HYL. Telemetrian välit se kuitenkin mittaa PC:n kellolla. Tallenna tuloste nimellä `ennen.txt` ja täytä taulukko:
+
+| Mittari | Ennen (`main`, millis) | Jälkeen (PR #1) | Miksi sillä on väliä laitteelle |
+| --- | --- | --- | --- |
+| Telemetrian välin hajonta ja suurin väli (`vali_hajonta_ms`, `vali_max_ms`), animaatiot mukana | *mitataan* | *mitataan* | Kun pääsilmukka ei jää jumiin animaation laskentaan, mittaukset ja säätö tapahtuvat ajallaan. Ennuste: vanhassa firmwaressa animaation aikana yksi kehys ja telemetrian keskiarvo laskettiin kumpikin LED kerrallaan, eli 78 kertaa raskas laskenta, joten välit venyvät. |
+| Animaation kesto sekuntikellolla | *mitataan* | *mitataan* | Animaation pitää kestää suunnitellut 30 s, eikä sen pidä nykiä. |
+| Suoritinkuorma säätötilassa ja animaatiossa | ei mitattavissa | *mitataan* (simavr: ~4 % / enintään 36 %) | Uusi mittari. Vapaa osuus (~96 %) on se aika, jonka seuraava konsepti (unitilat) voi nukkua. |
+| Ohitetut tikit animaation aikana | – | 0 (simavr) | |
+
+**Simulaattorissa (jo tehty):**
+
+| Mittari | Ennen nopeutusta | Jälkeen | Merkitys |
+| --- | --- | --- | --- |
+| Ohitetut tikit animaation aikana | 153 kpl noin 10 s:ssa | 0 kpl | Mittari paljasti, että animaatiokehyksen laskenta vei yli 10 ms. Korjauksena koko nauha lasketaan kerralla (`lamp_render_pm`), ja PC-testi todentaa, että tulos on bitilleen sama. |
+| Suoritinkuorma animaation aikana | enintään 81 % | enintään 36 % | Laskenta on yli kaksi kertaa kevyempi, joten animaatio pysyy 50 kehyksessä sekunnissa. |
+| Keskeytysrutiinin hinta | – | 29 käskyä, noin 62 kellojaksoa ≈ 4 µs / 10 ms = 0,04 % | Rutiini on lyhyt, joten työ tehdään pääsilmukassa. |
+
+Simulaattorin luvuissa valoanturi lukee 0 eikä INA219:ää ole, joten laudalla luvut ovat hieman suurempia (I2C-luku 5 kertaa sekunnissa).
+
+**Rehellinen arvio:** ajastin itsessään ei muuta lampun käytöstä käyttäjän silmin. Sen hyöty laitteelle on kolmenlainen. Ensinnäkin ajoitus on mitattavissa ja todennettavissa. Toiseksi mittaus löysi ja auttoi korjaamaan animaation ylikuorman. Kolmanneksi ajastin on herätelähde, jota unitila tarvitsee. Unitilan energiahyöty mitataan konseptissa 2 (Lab 3:n menetelmällä).
+
+### Simulaattorissa (ilman laitetta)
+
+```
+# käännä niin, että validointirivit ovat päällä heti käynnistyksestä
+arduino-cli compile --fqbn arduino:avr:uno --build-property "compiler.cpp.extra_flags=-DDIAG_DEFAULT=1" --output-dir out firmware/luxlamppu
+simavr -m atmega328p -f 16000000 out/luxlamppu.ino.elf > sim.out   # pysäytä noin 75 s:n jälkeen (Ctrl+C)
+python validointi/validoi_ajoitus.py --simavr < sim.out
+```
+
+Simulaattori ei tunne PC:n kelloa, joten tikin taajuutta ei tarkisteta. Sen sijaan tarkistetaan, että validointirivi tulee tasan 100 tikin välein.

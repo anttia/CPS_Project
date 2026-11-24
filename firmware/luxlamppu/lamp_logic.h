@@ -130,11 +130,7 @@ static inline void lamp_step(Lamp *l, uint32_t now, uint8_t pir, uint16_t light_
    LAMP_ANIM_EDGE_PM:n verran pidemmälle. Kirkastuminen on neliöllinen, jotta se
    näyttää silmälle tasaiselta. 30 s:n animaatiossa keskimmäinen LED kirkastuu
    noin 9 s:ssa ja valo saavuttaa reunat noin 21 s:n kohdalla. */
-static inline int16_t lamp_led_pm(const Lamp *l, uint16_t i, uint16_t n, uint32_t now) {
-    if (l->state == LAMP_ON) return l->level_pm;
-    if (l->state == LAMP_OFF) return 0;
-
-    int32_t reach = lamp_anim_phase(l, now) * (1000 + LAMP_ANIM_EDGE_PM) / 1000;
+static inline int16_t lamp_led_at(const Lamp *l, int32_t reach, uint16_t i, uint16_t n) {
     int32_t d = 2 * (int32_t)i - (int32_t)(n - 1);          // etäisyys keskeltä × 2
     if (d < 0) d = -d;
     d = n > 1 ? d * 1000 / (int32_t)(n - 1) : 0;            // 0 = keskellä, 1000 = reunalla
@@ -143,6 +139,41 @@ static inline int16_t lamp_led_pm(const Lamp *l, uint16_t i, uint16_t n, uint32_
     if (f > 1000) f = 1000;
     f = f * f / 1000;
     return (int16_t)((int32_t)l->anim_level_pm * f / 1000);
+}
+
+/* Valon etureunan paikka promilleina nauhan puolikkaasta (sama koko kehykselle). */
+static inline int32_t lamp_anim_reach(const Lamp *l, uint32_t now) {
+    return lamp_anim_phase(l, now) * (1000 + LAMP_ANIM_EDGE_PM) / 1000;
+}
+
+static inline int16_t lamp_led_pm(const Lamp *l, uint16_t i, uint16_t n, uint32_t now) {
+    if (l->state == LAMP_ON) return l->level_pm;
+    if (l->state == LAMP_OFF) return 0;
+    return lamp_led_at(l, lamp_anim_reach(l, now), i, n);
+}
+
+/* Koko nauhan kirkkaudet kerralla taulukkoon out[n]: sama tulos kuin lamp_led_pm()
+   jokaiselle LEDille, mutta nopeampi. Etureunan paikka lasketaan kerran kehystä kohden,
+   ja koska nauha on symmetrinen keskikohdan suhteen, LEDit i ja n-1-i saavat saman arvon
+   yhdellä laskulla. Palauttaa nauhan keskimääräisen kirkkauden (= lamp_display_pm).
+   Syy: 8-bittinen AVR jakaa 32-bittisiä lukuja ohjelmallisesti, ja LED kerrallaan
+   laskettuna animaatiokehys vei yli 10 ms, jolloin Timer1:n tikkejä jäi käsittelemättä. */
+static inline int16_t lamp_render_pm(const Lamp *l, uint16_t n, uint32_t now, int16_t *out) {
+    if (n == 0) return 0;
+    if (l->state == LAMP_ON || l->state == LAMP_OFF) {
+        int16_t v = l->state == LAMP_ON ? l->level_pm : 0;
+        for (uint16_t i = 0; i < n; i++) out[i] = v;
+        return v;
+    }
+    int32_t reach = lamp_anim_reach(l, now);
+    int32_t sum = 0;
+    for (uint16_t i = 0; i <= (n - 1) / 2; i++) {
+        uint16_t j = n - 1 - i;
+        int16_t v = lamp_led_at(l, reach, i, n);
+        out[i] = out[j] = v;
+        sum += (i == j) ? v : 2 * (int32_t)v;
+    }
+    return (int16_t)(sum / n);
 }
 
 /* Nauhan keskimääräinen kirkkaus promilleina: ilmoitetaan dashboardille. */

@@ -28,21 +28,56 @@
  *     H,<1-3600>    pitoaika sekunteina
  *     K,<1-50>      säätimen kerroin (promillea kirkkautta per ADC-yksikkö per askel)
  *
+ *     D,<0|1>       ajoituksen validointirivi pois/päälle (ks. alla)
+ *
+ * Validointi (ks. VALIDOINTI.md): komennolla D,1 laite lähettää kerran sekunnissa rivin
+ *     #diag,tikit,myöhästyneet,suurin_viive_us,kuorma_promillea
+ * Dashboard ohittaa #-rivit; dashboard/validoi_ajoitus.py analysoi ne. Lisäksi D8 (PB0)
+ * vaihtaa tilaa joka tikillä, joten siinä näkyy 50 Hz:n kanttiaalto skoopilla tai
+ * yleismittarin taajuusasteikolla.
+ *
  * "100 %" on suurin kirkkaus, jonka virtabudjetti CURRENT_LIMIT_MA sallii valkoiselle.
+ *
+ * Ajoitus tulee omasta Timer1-ajastimesta (CTC-tila, 10 ms:n tikki), ei Arduinon
+ * millis()-funktiosta. Keskeytysrutiini vain kasvattaa tikkilaskuria; pääsilmukka
+ * lukee laskurin atomisesti ja ajaa säädön, animaation ja telemetrian sen mukaan.
  *
  * Valoanturi (ADC) ja LED-nauha (WS2812-protokolla) käyttävät rekistereitä suoraan.
  * INA219 luetaan toistaiseksi Adafruit INA219 -kirjastolla; oma I2C-ajuri tulee
  * vaiheessa 2. Asenna Arduino IDE:n Library Managerista: Adafruit INA219.
  */
+#include <avr/interrupt.h>
+#include <util/atomic.h>
 #include <Wire.h>
 #include <Adafruit_INA219.h>
 #include "lamp_logic.h"
 
 #define NUM_LEDS          39     // nauhan LEDien määrä
 #define CURRENT_LIMIT_MA  900    // virtabudjetti nauhalle: USB-breakout ja vähintään 1 A:n laturi
+#define TICK_MS           10     // Timer1:n tikki: ohjelman ajan perusyksikkö
 #define CONTROL_MS        100    // säätöväli
 #define FRAME_MS          20     // animaation päivitysväli
 #define SEND_INTERVAL_MS  200    // mittausrivi viisi kertaa sekunnissa
+
+// Tehtävien välit tikkeinä. Jokaisen välin pitää olla tikin monikerta.
+#define CONTROL_TICKS     (CONTROL_MS / TICK_MS)
+#define FRAME_TICKS       (FRAME_MS / TICK_MS)
+#define SEND_TICKS        (SEND_INTERVAL_MS / TICK_MS)
+#if (CONTROL_MS % TICK_MS) || (FRAME_MS % TICK_MS) || (SEND_INTERVAL_MS % TICK_MS)
+#error "Tehtävien välien pitää olla TICK_MS:n monikertoja"
+#endif
+
+// Timer1: 16 MHz / esijakaja 64 = 250 kHz, eli yksi askel 4 µs.
+// 10 ms = 2500 askelta, ja laskuri nollautuu vertailuarvon jälkeen: OCR1A = 2500 - 1.
+#define TIMER1_PRESCALER  64UL
+#define TIMER1_TOP        (F_CPU / TIMER1_PRESCALER * TICK_MS / 1000UL - 1)
+#if TIMER1_TOP > 65535
+#error "TIMER1_TOP ei mahdu 16-bittiseen OCR1A-rekisteriin"
+#endif
+#define STEPS_PER_TICK    (TIMER1_TOP + 1)   // 2500 Timer1-askelta (4 µs) per tikki
+
+#define TICK_MARK_PIN     PB0    // D8: ISR vaihtaa tilaa joka tikillä (validointia varten)
+#define DIAG_TICKS        100    // validointirivi kerran sekunnissa
 
 static uint8_t leds[NUM_LEDS * 3];   // jokaiselle LEDille G, R, B
 static uint8_t max_level;            // valkoisen taso (0–255), joka vastaa 100 %
@@ -52,12 +87,101 @@ static uint8_t last_pir = 0;
 Adafruit_INA219 ina219;              // osoite 0x40
 static bool ina_ok = false;
 
+/* ---------- Ajastin: Timer1 CTC, 10 ms:n tikki ---------- */
+
+/* Tikkilaskuri on jaettu keskeytysrutiinin ja pääsilmukan kesken:
+   - volatile: kääntäjä lukee arvon muistista joka kerta eikä pidä sitä rekisterissä,
+     koska keskeytys voi muuttaa sitä milloin tahansa.
+   - volatile ei tee lukemisesta atomista: 8-bittinen AVR lukee 32-bittisen arvon
+     neljänä tavuna, ja keskeytys voi osua lukujen väliin (revitty luku). Siksi
+     pääsilmukka lukee laskurin vain ticks_now()-funktiolla keskeytykset estettyinä.
+   - laskuri on parempi kuin pelkkä lippu: jos pääsilmukka myöhästyy (esim. LED-nauhan
+     päivitys estää keskeytykset noin 1,2 ms), tikkejä ei katoa. */
+static volatile uint32_t tick_count = 0;
+
+/* Vertailukeskeytys 10 ms:n välein. Rutiini on tarkoituksella lyhyt: se vain kirjaa
+   tikin, ja varsinainen työ tehdään pääsilmukassa. OCF1A-lippu nollautuu laitteistossa,
+   kun keskeytysrutiini käynnistyy. */
+ISR(TIMER1_COMPA_vect) {
+    tick_count++;
+    PINB = (1 << TICK_MARK_PIN);              // PINx:ään kirjoitettu 1 vaihtaa pinnin tilaa
+}
+
+/* Timer1 CTC-tilaan Lab 2:n järjestyksessä. Arduinon init() on asettanut Timer1:n
+   PWM-tilaan (analogWrite D9/D10); tämä korvaa asetukset kokonaan, joten D9:n ja
+   D10:n analogWrite ei ole käytössä. Arduinon Timer0 (millis) jää toistaiseksi
+   päälle Wire-kirjaston aikakatkaisua varten, mutta ohjelma ei käytä sitä. */
+static void timer1_init(void) {
+    uint8_t sreg = SREG;
+    cli();
+    TCCR1B = 0;                               // 1. pysäytä ajastin: CS12:CS10 = 000
+    TCCR1A = 0;                               // 2. OC1A/OC1B irti pinneistä, WGM11:10 = 00
+    TCCR1B = (1 << WGM12);                    //    WGM13:12 = 01 -> tila 4, CTC, TOP = OCR1A
+    TCNT1  = 0;                               // 3. laskuri tunnettuun arvoon
+    OCR1A  = TIMER1_TOP;                      // 4. 2499 -> jakso 2500 × 4 µs = 10 ms
+    TIFR1  = (1 << OCF1A);                    // 5. vanha lippu pois kirjoittamalla 1
+    TIMSK1 = (1 << OCIE1A);                   // 6. vertailukeskeytys A päälle
+    TCCR1B |= (1 << CS11) | (1 << CS10);      // 7. esijakaja 64 (CS12:CS10 = 011): käynnistyy
+    SREG = sreg;                              // 8. globaali keskeytyslupa takaisin
+}
+
+/* Tikkien määrä käynnistyksestä. ATOMIC_BLOCK estää keskeytykset lukemisen ajaksi
+   (cli) ja palauttaa SREG:n entiseen tilaan, joten luku ei voi revetä. */
+static uint32_t ticks_now(void) {
+    uint32_t t;
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+        t = tick_count;
+    }
+    return t;
+}
+
+/* Aika käynnistyksestä Timer1-askelina (4 µs): tikit × 2500 + TCNT1. Jos vertailu on
+   juuri tapahtunut mutta keskeytysrutiini ei ole vielä ehtinyt (keskeytykset estetty),
+   TCNT1 on jo nollautunut ja OCF1A-lippu on päällä: silloin tikkejä on yksi enemmän. */
+static uint32_t steps_now(void) {
+    uint32_t t;
+    uint16_t c;
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+        c = TCNT1;
+        t = tick_count;
+        if ((TIFR1 & (1 << OCF1A)) && c < STEPS_PER_TICK / 2) t++;
+    }
+    return t * STEPS_PER_TICK + c;
+}
+
+/* ---------- Validointi: ajoituksen mittarit ---------- */
+#ifndef DIAG_DEFAULT
+#define DIAG_DEFAULT 0                // 1 = validointirivit päällä käynnistyksestä (simulaattori)
+#endif
+static bool     diag_on = DIAG_DEFAULT;
+static uint32_t diag_late = 0;        // kertaa, kun pääsilmukka ohitti tikin kokonaan
+static uint32_t diag_lat_max = 0;     // suurin viive tikistä työn alkuun (askelia, 4 µs)
+static uint32_t diag_busy = 0;        // työhön kulunut aika jakson aikana (askelia)
+static uint32_t diag_window = 0;      // jakson alkutikki
+
+static void diag_reset(uint32_t t) {
+    diag_lat_max = 0;
+    diag_busy = 0;
+    diag_window = t;
+}
+
+static void send_diag(uint32_t t) {
+    uint32_t span = (t - diag_window) * STEPS_PER_TICK;
+    Serial.print(F("#diag,"));
+    Serial.print(t);                                Serial.print(',');
+    Serial.print(diag_late);                        Serial.print(',');
+    Serial.print(diag_lat_max * 4);                 Serial.print(',');   // askeleet -> µs
+    Serial.println(span ? diag_busy * 1000UL / span : 0);
+}
+
 /* ---------- LED-nauha: WS2812-protokolla, data D6 (PD6), 16 MHz ---------- */
 static void ws_show(void) {
     uint8_t hi = PORTD | (1 << PD6);
     uint8_t lo = PORTD & ~(1 << PD6);
     uint8_t sreg = SREG;
-    cli();                                    // Arduinon ajastinkeskeytys rikkoisi ajoituksen
+    cli();                                    // keskeytys kesken bitin rikkoisi ajoituksen.
+                                              // Timer1:n lippu jää odottamaan, ja tikki
+                                              // käsitellään heti tämän jälkeen (myöhässä ≤ 1,2 ms)
     for (uint16_t i = 0; i < sizeof leds; i++) {
         uint8_t b = leds[i], n = 8;
         asm volatile(
@@ -88,11 +212,22 @@ static uint8_t compute_max_level(void) {
     return (uint8_t)((CURRENT_LIMIT_MA - idle_ma) * 255UL / (full_ma - idle_ma));
 }
 
-/* Piirtää nauhan lampun tilan mukaan. Palauttaa true, jos jokin LED muuttui. */
+static int16_t led_pm[NUM_LEDS];     // LEDien kirkkaudet promilleina (lamp_render_pm)
+static int16_t display_pm = 0;       // nauhan keskimääräinen kirkkaus viimeisimmästä piirrosta
+
+/* Piirtää nauhan lampun tilan mukaan. Palauttaa true, jos jokin LED muuttui.
+   lamp_render_pm laskee koko nauhan kerralla; LED kerrallaan laskettuna animaatiokehys
+   vei yli 10 ms ja Timer1:n tikkejä jäi käsittelemättä (ks. VALIDOINTI.md). */
 static bool render(uint32_t now) {
     bool changed = false;
+    display_pm = lamp_render_pm(&lamp, NUM_LEDS, now, led_pm);
+    int16_t prev_pm = -1;
+    uint8_t level = 0;
     for (uint16_t i = 0; i < NUM_LEDS; i++) {
-        uint8_t level = (uint32_t)lamp_led_pm(&lamp, i, NUM_LEDS, now) * max_level / 1000;
+        if (led_pm[i] != prev_pm) {           // sama arvo kuin edellisellä: ei jakolaskua
+            prev_pm = led_pm[i];
+            level = (uint32_t)prev_pm * max_level / 1000;
+        }
         if (leds[3 * i] != level) changed = true;
         leds[3 * i] = leds[3 * i + 1] = leds[3 * i + 2] = level;   // valkoinen: G = R = B
     }
@@ -128,6 +263,7 @@ static void handle_command(const char *line) {
     case 'T': if (v >= 0 && v <= 1023) lamp.target = (uint16_t)v; break;
     case 'H': if (v >= 1 && v <= 3600) lamp.hold_ms = (uint32_t)v * 1000UL; break;
     case 'K': if (v >= 1 && v <= 50) lamp.ki = (uint8_t)v; break;
+    case 'D': diag_on = (v != 0); diag_reset(ticks_now()); break;
     }
 }
 
@@ -159,7 +295,7 @@ static void send_telemetry(void) {
     }
     Serial.print(last_pir);                         Serial.print(',');
     Serial.print(lamp_light(&lamp));                Serial.print(',');
-    Serial.print((lamp_display_pm(&lamp, NUM_LEDS, millis()) + 5) / 10); Serial.print(',');
+    Serial.print((display_pm + 5) / 10); Serial.print(',');
     Serial.print(lamp.target);                      Serial.print(',');
     Serial.print(lamp.state);                       Serial.print(',');
     Serial.print(mv);                               Serial.print(',');
@@ -172,6 +308,7 @@ void setup() {
     DDRD |= (1 << PD6);                       // nauhan data lähdöksi
     PORTD &= ~(1 << PD6);
     DDRD &= ~(1 << PD2);                      // PIR sisääntuloksi
+    DDRB |= (1 << TICK_MARK_PIN);             // tikkimerkki D8 lähdöksi
     adc_init();
 
     Wire.begin();
@@ -180,7 +317,8 @@ void setup() {
     Wire.setWireTimeout(25000, true);
 
     max_level = compute_max_level();
-    lamp_init(&lamp, millis());
+    timer1_init();
+    lamp_init(&lamp, ticks_now() * TICK_MS);
     ws_show();                                // kaikki LEDit pois
 
     Serial.print(F("V,"));                    // käännösaika: dashboard näyttää, mikä versio on kortilla
@@ -189,23 +327,42 @@ void setup() {
     Serial.println(F(__TIME__));
 }
 
+/* Pääsilmukka etenee Timer1:n tikeissä. Ajat lasketaan tikkien erotuksena etumerkittömällä
+   aritmetiikalla. lamp_logic.h käyttää millisekunteja: now = tikit × 10 ms. Arvo
+   kiertää ympäri noin 49,7 päivän välein kuten millis(), mutta erotukset pysyvät
+   oikeina, koska lamp_logic.h vertaa vain aikojen erotuksia. */
 void loop() {
-    static uint32_t last_control = 0, last_frame = 0, last_send = 0;
-    uint32_t now = millis();
+    static uint32_t last_tick = 0, last_control = 0, last_frame = 0, last_send = 0;
     read_serial();
 
-    if (now - last_control >= CONTROL_MS) {
-        last_control = now;
+    uint32_t t = ticks_now();
+    if (t == last_tick) return;               // ei uutta tikkiä: ei tehtävää
+    uint32_t work_start = steps_now();
+    if (t - last_tick > 1) diag_late++;       // välissä oli tikki, jota ei ehditty käsitellä
+    last_tick = t;
+    uint32_t now = t * TICK_MS;
+    uint32_t latency = work_start - t * STEPS_PER_TICK;
+    if (latency > diag_lat_max) diag_lat_max = latency;
+
+    if (t - last_control >= CONTROL_TICKS) {
+        last_control = t;
         last_pir = (PIND & (1 << PD2)) ? 1 : 0;
         lamp_step(&lamp, now, last_pir, read_light());
         render(now);
     }
-    if ((lamp.state == LAMP_GOODBYE || lamp.state == LAMP_WELCOME) && now - last_frame >= FRAME_MS) {
-        last_frame = now;
+    if ((lamp.state == LAMP_GOODBYE || lamp.state == LAMP_WELCOME) && t - last_frame >= FRAME_TICKS) {
+        last_frame = t;
         render(now);                          // animaatio etenee 50 kertaa sekunnissa
     }
-    if (now - last_send >= SEND_INTERVAL_MS) {
-        last_send = now;
+    if (t - last_send >= SEND_TICKS) {
+        last_send = t;
         send_telemetry();
+    }
+    if (diag_on) {
+        diag_busy += steps_now() - work_start;
+        if (t - diag_window >= DIAG_TICKS) {
+            send_diag(t);
+            diag_reset(t);
+        }
     }
 }

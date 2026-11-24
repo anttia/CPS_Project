@@ -157,6 +157,36 @@ static void test_reverse(void) {
     CHECK(later > after, "kirkkaus ei kasva heräämisessä");
 }
 
+/* lamp_render_pm() laskee koko nauhan kerralla nopeammin; tuloksen pitää olla täsmälleen
+   sama kuin lamp_led_pm():llä LED kerrallaan, kaikissa tiloissa ja eri nauhan pituuksilla. */
+static void test_render_matches(void) {
+    printf("Nopea koko nauhan laskenta = LED kerrallaan\n");
+    uint16_t lengths[] = {1, 2, 3, 38, 39, 60};
+    uint8_t states[] = {LAMP_OFF, LAMP_ON, LAMP_GOODBYE, LAMP_WELCOME};
+    int16_t out[60];
+    long compared = 0;
+    for (int a = 0; a < 6; a++) {
+        uint16_t n = lengths[a];
+        for (int b = 0; b < 4; b++) {
+            Lamp l;
+            lamp_init(&l, 0);
+            l.level_pm = 640;
+            lamp_start_anim(&l, states[b], 0);
+            l.state = states[b];
+            for (uint32_t t = 0; t <= LAMP_ANIM_MS; t += 250) {
+                int16_t avg = lamp_render_pm(&l, n, t, out);
+                for (uint16_t i = 0; i < n; i++, compared++)
+                    CHECK(out[i] == lamp_led_pm(&l, i, n, t),
+                          "n=%u tila=%u t=%lu LED %u: %d != %d", n, states[b], (unsigned long)t, i,
+                          out[i], lamp_led_pm(&l, i, n, t));
+                CHECK(avg == lamp_display_pm(&l, n, t), "n=%u t=%lu keskiarvo %d != %d",
+                      n, (unsigned long)t, avg, lamp_display_pm(&l, n, t));
+            }
+        }
+    }
+    printf("  verrattu %ld LED-arvoa\n", compared);
+}
+
 int main(void) {
     srand(1);
     double gains[] = {0.5, 1.0, 2.0, 4.0, 6.0};
@@ -166,6 +196,7 @@ int main(void) {
     test_presence();
     test_animation();
     test_reverse();
+    test_render_matches();
     printf(failures ? "\n%d testiä epäonnistui\n" : "\nKaikki testit läpäisty\n", failures);
     return failures ? 1 : 0;
 }
