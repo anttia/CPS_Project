@@ -111,9 +111,9 @@ gcc -std=c99 -Wall -Wextra -I.. test_lamp_logic.c -lm -o test && ./test
 
 Testi tarkistaa, että säätö asettuu tavoitteeseen eri lampun vahvistuksilla värähtelemättä, palaa saavuttamattomasta tavoitteesta (anti-windup), sammuttaa lampun kirkkaassa huoneessa, ja että pitoaika ja animaatiot toimivat oikeaan aikaan.
 
-Dashboard tallentaa kaiken vastaanotetun datan tiedostoon `mittaus_<päivämäärä>.csv` (demossa `demo_<päivämäärä>.csv`).
+Dashboard tallentaa kaiken vastaanotetun datan kansioon `dashboard/mittaukset/`, tiedostoon `mittaus_<päivämäärä>.csv` (demossa `demo_<päivämäärä>.csv`). Kansio syntyy automaattisesti, eikä se mene Gitiin.
 
-**Aikaväli:** kaavioiden aikavälin voi valita painikkeilla 2 min, 15 min, 1 h, 3 h tai 12 h. Tunnin ja sitä pidemmillä aikaväleillä kaaviot näyttävät 10 sekunnin jaksojen keskiarvot, ja tehokaavion vaalea alue näyttää jakson pienimmän ja suurimman tehon. Tehokaavion kulmassa on näkyvän jakson keskiteho, suurin teho ja energia. Dashboard lataa käynnistyessään saman kansion `mittaus_*.csv`-tiedostoista viimeisten 12 tunnin mittaukset, joten historia säilyy uudelleenkäynnistyksen yli (`--ei-historiaa` ohittaa latauksen). Katkot mittauksissa näkyvät katkoina käyrissä.
+**Aikaväli:** kaavioiden aikavälin voi valita painikkeilla 2 min, 15 min, 1 h, 3 h tai 12 h. Tunnin ja sitä pidemmillä aikaväleillä kaaviot näyttävät 10 sekunnin jaksojen keskiarvot, ja tehokaavion vaalea alue näyttää jakson pienimmän ja suurimman tehon. Tehokaavion kulmassa on näkyvän jakson keskiteho, suurin teho ja energia. Dashboard lataa käynnistyessään `dashboard/mittaukset/`-kansion `mittaus_*.csv`-tiedostoista viimeisten 12 tunnin mittaukset, joten historia säilyy uudelleenkäynnistyksen yli (`--ei-historiaa` ohittaa latauksen). Katkot mittauksissa näkyvät katkoina käyrissä.
 
 ## Viestimuoto
 

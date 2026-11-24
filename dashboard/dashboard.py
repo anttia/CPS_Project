@@ -14,7 +14,7 @@ ja näyttää:
 Kaavioiden aikavälin voi valita painikkeilla (2 min – 12 h). Pitkillä aikaväleillä
 näytetään 10 sekunnin jaksojen keskiarvot, ja tehokaaviossa vaalea alue näyttää
 jakson pienimmän ja suurimman tehon. Dashboard lataa käynnistyessään edellisten
-12 tunnin mittaukset samassa kansiossa olevista mittaus_*.csv-tiedostoista, joten
+12 tunnin mittaukset kansion dashboard/mittaukset mittaus_*.csv-tiedostoista, joten
 historia säilyy, vaikka dashboard käynnistetään uudelleen.
 
 Liukusäädin asettaa tavoitteen valoanturin yksiköissä: Arduino säätää LED-nauhan
@@ -85,6 +85,9 @@ TARGET_MAX = 600         # liukusäätimen yläraja
 ANIM_S = 30.0            # animaation kesto (sama kuin firmwaren LAMP_ANIM_MS)
 CONTROL_PORT = 47219     # paikallinen portti, josta dashboard ottaa vastaan "stop"-käskyn
 STOP_WAIT_S = 10         # kuinka kauan "stop" odottaa dashboardin sulkeutumista
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mittaukset")
+                         # mittauslokit (mittaus_*.csv, demo_*.csv) dashboardin alakansiossa,
+                         # riippumatta siitä, mistä kansiosta dashboard käynnistetään
 DIAG_WINDOW_S = 600      # Järjestelmä-välilehden kaavioiden aikaväli (10 min)
 DIAG_STALE_S = 5         # näin kauan ilman #diag-riviä: firmware ei lähetä niitä
 TICK_MS = 10             # firmwaren Timer1-tikki
@@ -969,14 +972,16 @@ def main():
                         help=f"näkymän päivitysväli sekunteina (0,2–60, oletus {UPDATE_S:g})")
     parser.add_argument("--ki", type=int, help="säätimen kerroin 1–50 (oletus: Arduinon oma, 3)")
     parser.add_argument("--log", help="CSV-tiedosto, johon data tallennetaan "
-                        "(oletus mittaus_<aika>.csv, demossa demo_<aika>.csv)")
+                        "(oletus mittaukset/mittaus_<aika>.csv, demossa mittaukset/demo_<aika>.csv)")
     parser.add_argument("--ei-historiaa", action="store_true",
-                        help="älä lataa aiempia mittauksia mittaus_*.csv-tiedostoista")
+                        help="älä lataa aiempia mittauksia mittaukset/mittaus_*.csv-tiedostoista")
     args = parser.parse_args()
     if args.komento == "stop":
         sys.exit(send_stop())
     if args.log is None:
-        args.log = f"{'demo' if args.demo else 'mittaus'}_{datetime.now():%Y%m%d_%H%M%S}.csv"
+        os.makedirs(LOG_DIR, exist_ok=True)
+        name = f"{'demo' if args.demo else 'mittaus'}_{datetime.now():%Y%m%d_%H%M%S}.csv"
+        args.log = os.path.join(LOG_DIR, name)
     if not 1 <= args.pitoaika <= 3600:
         sys.exit("--pitoaika pitää olla 1–3600 sekuntia")
     if not 0.2 <= args.paivitys <= 60:
@@ -1001,7 +1006,8 @@ def main():
             state.add(t, sim.step(t), history=True)
             t += 0.2
     elif not args.ei_historiaa:
-        paths = [p for p in glob.glob("mittaus_*.csv") if os.path.getmtime(p) >= now - LONG_S]
+        paths = [p for p in glob.glob(os.path.join(LOG_DIR, "mittaus_*.csv"))
+                 if os.path.getmtime(p) >= now - LONG_S]
         if paths:
             count = load_history(state, paths, now)
             print(f"Ladattiin {count} aiempaa näytettä {len(paths)} tiedostosta (viimeiset 12 h).")
