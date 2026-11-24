@@ -67,3 +67,32 @@ python validointi/validoi_ajoitus.py --simavr < sim.out
 ```
 
 Simulaattori ei tunne PC:n kelloa, joten tikin taajuutta ei tarkisteta. Sen sijaan tarkistetaan, että validointirivi tulee tasan 100 tikin välein.
+
+---
+
+## Konsepti 2: PIR pin change -keskeytyksellä
+
+**Mitä muuttui:** PIR:iä ei enää lueta pollaamalla 100 ms:n säätöaskeleella. Pinnin D2 muutos käynnistää keskeytyksen (`PCINT2_vect`), joka kirjaa liikkeen alun. Pääsilmukka herättää lampun seuraavalla 10 ms:n tikillä (`lamp_motion()`).
+
+**Mittari firmwaressa:** pinni **D7 (PD7)** nousee, kun pääsilmukka on käsitellyt PIR:n nousevan reunan, ja laskee, kun PIR:n signaali laskee. Viive PIR:n reunasta D7:n reunaan on liikkeen käsittelyn viive.
+
+### 1) Toimii: laudalla tehtävät askeleet
+
+| # | Askel | Hyväksytty, kun |
+| --- | --- | --- |
+| 1 | Lataa PR:n firmware ja käynnistä dashboard. Liiku PIR:n edessä ja pysy sitten paikallasi. | Dashboardin "Liikettä"-kenttä ja liikealue kaaviossa seuraavat PIR:iä kuten ennenkin. |
+| 2 | Aseta pitoajaksi 20 s (`python dashboard/dashboard.py --pitoaika 20`). Poistu, odota että nauha sammuu, ja palaa. | Herääminen alkaa, kun PIR havaitsee liikkeen. Sama myös kesken sammumisanimaation: valo kääntyy kirkastumaan ilman välähdystä. |
+| 3 | Kytke skooppi: kanava 1 PIR:n SIG (D2), kanava 2 D7, maa GND:hen. Laukaisu kanavan 1 nousevaan reunaan. Toista liike 20 kertaa ja kirjaa suurin viive (pysyvä näyttö tai kursorit). | D7 nousee jokaisella kerralla, ja viive on enintään yksi tikki (10 ms) plus konseptin 1 suurin viive tikistä työhön, eli käytännössä enintään noin 12 ms. |
+| 4 | Aja ajoituksen validointi kuten konseptissa 1 (`validoi_ajoitus.py --kesto 600 --pitoaika 20`). | Kriteerit täyttyvät edelleen: uusi keskeytys ei aiheuta ohitettuja tikkejä. |
+
+### 2) Hyöty: ennen/jälkeen
+
+| Mittari | Ennen (pollaus) | Jälkeen (keskeytys) | Miksi sillä on väliä laitteelle |
+| --- | --- | --- | --- |
+| Viive PIR:n reunasta liikkeen käsittelyyn | 0–100 ms (säätöaskeleen jakso, laskettu) | *mitataan* skoopilla, odotus enintään 10 ms | Lamppu reagoi liikkeeseen kymmenesosassa ajasta. |
+| Herätelähde unitilalle | ei ole | pin change -keskeytys | Power-down-unesta herättää vain keskeytys. Pollaus ei toimi, kun suoritin nukkuu. |
+
+Ennen-viive on laskettu, koska vanhassa firmwaressa ei ole merkkipinniä: pollaus luki PIR:n kerran 100 ms:ssa, joten viive on reunan ajankohdasta riippuen 0–100 ms.
+
+**Rehellinen arvio:** käyttäjä ei huomaa eroa, koska PIR itse reagoi liikkeeseen noin sekunnin viiveellä. Muutoksen hyöty on siinä, että liike käsitellään tapahtumana eikä kyselemällä, viive on mitattavissa, ja keskeytys on herätelähde, jota seuraava konsepti (unitilat) tarvitsee.
+

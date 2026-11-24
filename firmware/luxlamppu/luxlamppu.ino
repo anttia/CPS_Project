@@ -16,6 +16,10 @@
  *   - kun liike havaitaan uudelleen, valo leviää keskeltä reunoille ja kirkastuu 30 s:ssa,
  *     minkä jälkeen säätö jatkuu
  *
+ * PIR luetaan pin change -keskeytyksellä (D2 = PCINT18): liikkeen alku käsitellään
+ * seuraavalla 10 ms:n tikillä eikä vasta 100 ms:n säätöaskeleella. D7 nousee ylös, kun
+ * pääsilmukka on käsitellyt liikkeen, ja laskee, kun PIR:n signaali laskee (validointia varten).
+ *
  * Lähettää viisi kertaa sekunnissa rivin
  *     pir,valo,kirkkaus,tavoite,tila,jannite_mV,virta_mA,teho_mW
  * missä tila on 0 = pois, 1 = säätö, 2 = sammumisanimaatio, 3 = heräämisanimaatio.
@@ -77,12 +81,13 @@
 #define STEPS_PER_TICK    (TIMER1_TOP + 1)   // 2500 Timer1-askelta (4 µs) per tikki
 
 #define TICK_MARK_PIN     PB0    // D8: ISR vaihtaa tilaa joka tikillä (validointia varten)
+#define MOTION_MARK_PIN   PD7    // D7: ylhäällä, kun pääsilmukka on käsitellyt liikkeen (validointia varten)
 #define DIAG_TICKS        100    // validointirivi kerran sekunnissa
 
 static uint8_t leds[NUM_LEDS * 3];   // jokaiselle LEDille G, R, B
 static uint8_t max_level;            // valkoisen taso (0–255), joka vastaa 100 %
 static Lamp lamp;
-static uint8_t last_pir = 0;
+static uint8_t last_pir = 0;         // PIR:n taso pääsilmukan viimeisimmällä tikillä
 
 Adafruit_INA219 ina219;              // osoite 0x40
 static bool ina_ok = false;
@@ -147,6 +152,35 @@ static uint32_t steps_now(void) {
         if ((TIFR1 & (1 << OCF1A)) && c < STEPS_PER_TICK / 2) t++;
     }
     return t * STEPS_PER_TICK + c;
+}
+
+/* ---------- PIR: pin change -keskeytys D2:ssa (PD2 = PCINT18) ---------- */
+
+/* Pin change -keskeytys laukeaa pinnin molemmista reunoista, joten rutiini lukee pinnin
+   tason ja kirjaa vain nousevan reunan eli liikkeen alun. Pääsilmukka käsittelee sen
+   seuraavalla tikillä, enintään 10 ms myöhemmin; pollaus huomasi liikkeen vasta 100 ms:n
+   säätöaskeleella. Pin change valittiin INT0:n sijaan, koska Power-down-unesta herättää
+   vain pin change tai INT0:n tasolaukaisu, ja PIR:n lepotaso on matala. */
+static volatile uint8_t pir_level = 0;   // PIR:n taso viimeisimmän muutoksen jälkeen
+static volatile uint8_t pir_rose = 0;    // liike alkoi, eikä pääsilmukka ole vielä käsitellyt sitä
+
+ISR(PCINT2_vect) {
+    uint8_t level = (PIND & (1 << PD2)) ? 1 : 0;
+    if (level && !pir_level) pir_rose = 1;
+    pir_level = level;
+}
+
+/* Sama järjestys kuin Lab 2:ssa: pinni, lähtötaso, pinnimaski, vanha lippu pois, ryhmä päälle. */
+static void pir_init(void) {
+    uint8_t sreg = SREG;
+    cli();
+    DDRD &= ~(1 << PD2);                      // PD2 sisääntuloksi
+    PORTD &= ~(1 << PD2);                     // ei sisäistä ylösvetoa: Grove PIR ajaa linjaa itse
+    pir_level = (PIND & (1 << PD2)) ? 1 : 0;  // lähtötaso ennen keskeytyksen sallimista
+    PCMSK2 |= (1 << PCINT18);                 // ryhmästä 2 (PORTD) vain D2
+    PCIFR = (1 << PCIF2);                     // vanha lippu pois kirjoittamalla 1
+    PCICR |= (1 << PCIE2);                    // pin change -ryhmä 2 päälle
+    SREG = sreg;
 }
 
 /* ---------- Validointi: ajoituksen mittarit ---------- */
@@ -307,7 +341,8 @@ void setup() {
     Serial.begin(9600);
     DDRD |= (1 << PD6);                       // nauhan data lähdöksi
     PORTD &= ~(1 << PD6);
-    DDRD &= ~(1 << PD2);                      // PIR sisääntuloksi
+    DDRD |= (1 << MOTION_MARK_PIN);           // liikemerkki D7 lähdöksi
+    PORTD &= ~(1 << MOTION_MARK_PIN);
     DDRB |= (1 << TICK_MARK_PIN);             // tikkimerkki D8 lähdöksi
     adc_init();
 
@@ -318,6 +353,7 @@ void setup() {
 
     max_level = compute_max_level();
     timer1_init();
+    pir_init();
     lamp_init(&lamp, ticks_now() * TICK_MS);
     ws_show();                                // kaikki LEDit pois
 
@@ -344,9 +380,23 @@ void loop() {
     uint32_t latency = work_start - t * STEPS_PER_TICK;
     if (latency > diag_lat_max) diag_lat_max = latency;
 
+    // PIR: keskeytys on kirjannut liikkeen alun, ja se käsitellään heti tällä tikillä.
+    // Lippu luetaan ja nollataan samassa atomisessa lohkossa, jottei uusi reuna katoa välistä.
+    uint8_t rose;
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+        rose = pir_rose;
+        pir_rose = 0;
+        last_pir = pir_level;
+    }
+    if (rose) {
+        lamp_motion(&lamp, now);              // herätys tai pitoajan nollaus heti
+        render(now);
+        PORTD |= (1 << MOTION_MARK_PIN);
+    }
+    if (!last_pir) PORTD &= ~(1 << MOTION_MARK_PIN);
+
     if (t - last_control >= CONTROL_TICKS) {
         last_control = t;
-        last_pir = (PIND & (1 << PD2)) ? 1 : 0;
         lamp_step(&lamp, now, last_pir, read_light());
         render(now);
     }

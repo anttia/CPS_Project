@@ -76,6 +76,15 @@ static inline void lamp_reverse_goodbye(Lamp *l, uint32_t now) {
     l->anim_start_ms = now - (LAMP_ANIM_MS - elapsed);
 }
 
+/* Liike havaittu: pitoaika alkaa alusta, ja sammuva tai pimeä lamppu alkaa herätä.
+   Firmware kutsuu tätä heti, kun PIR:n keskeytys on ilmoittanut liikkeen alkaneen, eikä
+   odota seuraavaa säätöaskelta. lamp_step() kutsuu tätä niin kauan kuin PIR näkee liikettä. */
+static inline void lamp_motion(Lamp *l, uint32_t now) {
+    l->last_motion_ms = now;
+    if (l->state == LAMP_GOODBYE) lamp_reverse_goodbye(l, now);
+    else if (l->state == LAMP_OFF) lamp_start_anim(l, LAMP_WELCOME, now);
+}
+
 /* Animaation vaihe promilleina: 0 = nauha pimeä, 1000 = koko nauha animaation kirkkaudessa. */
 static inline int32_t lamp_anim_phase(const Lamp *l, uint32_t now) {
     uint32_t t = now - l->anim_start_ms;
@@ -109,11 +118,11 @@ static inline void lamp_step(Lamp *l, uint32_t now, uint8_t pir, uint16_t light_
         }
         break;
     case LAMP_GOODBYE:
-        if (pir) lamp_reverse_goodbye(l, now);
+        if (pir) lamp_motion(l, now);
         else if (now - l->anim_start_ms >= LAMP_ANIM_MS) l->state = LAMP_OFF;
         break;
     case LAMP_OFF:
-        if (pir) lamp_start_anim(l, LAMP_WELCOME, now);
+        if (pir) lamp_motion(l, now);
         break;
     case LAMP_WELCOME:
         if (now - l->anim_start_ms >= LAMP_ANIM_MS) {
