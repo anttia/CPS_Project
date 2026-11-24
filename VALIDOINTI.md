@@ -96,3 +96,37 @@ Ennen-viive on laskettu, koska vanhassa firmwaressa ei ole merkkipinniä: pollau
 
 **Rehellinen arvio:** käyttäjä ei huomaa eroa, koska PIR itse reagoi liikkeeseen noin sekunnin viiveellä. Muutoksen hyöty on siinä, että liike käsitellään tapahtumana eikä kyselemällä, viive on mitattavissa, ja keskeytys on herätelähde, jota seuraava konsepti (unitilat) tarvitsee.
 
+---
+
+## Konsepti 3: viestiprotokolla, tarkistussumma ja rivin numero
+
+**Mitä muuttui:** jokaisen telemetriarivin loppuun tulee rivin numero (0–255) ja tarkistussumma (`*HH`, tavujen XOR). Dashboard hylkää rivit, joiden summa ei täsmää, ja laskee numeroiden aukoista kadonneet rivit. Ennen virheellinen rivi tunnistettiin vain kenttien määrästä ja arvoalueista, eikä kadonneita rivejä huomattu lainkaan.
+
+**Mittari:** Järjestelmä-välilehden rivi "Viestiyhteys": tarkistetut, hylätyt ja kadonneet rivit tämän yhteyden aikana.
+
+### Ilman laitetta (jo tehty)
+
+| Testi | Tulos |
+| --- | --- |
+| `test_protocol.c`: jokainen yksittäinen bittivirhe esimerkkirivissä | 217/217 havaittu |
+| `test_protocol.c`: kaksi samaa bittiä kahdessa eri tavussa | ei havaita (XOR:n tunnettu rajoitus) |
+| `dashboard/test_protokolla.py`: ehjät, rikkoutuneet, kadonneet (myös 255 → 0 -kierto), uudelleenkäynnistys, vanha muoto | kaikki oikein |
+
+### 1) Toimii: laudalla tehtävät askeleet
+
+| # | Askel | Hyväksytty, kun |
+| --- | --- | --- |
+| 1 | Lataa firmware ja käynnistä dashboard. | Lamppu-välilehti toimii kuten ennen. Järjestelmä-välilehdellä "Viestiyhteys" kasvaa noin 5 riviä sekunnissa. |
+| 2 | Anna dashboardin olla käynnissä vähintään 1 h tavallisessa käytössä (liiku välillä PIR:n edessä). Ota kuvakaappaus Järjestelmä-välilehdestä. | Hylättyjä 0 ja kadonneita 0, tai poikkeamat selitetään (esim. USB-kaapelin irrotus). |
+| 3 | Paina Unon reset-nappia dashboardin ollessa käynnissä. | Kadonneisiin tulee korkeintaan reset-hetken rivit (noin 2 s eli noin 10 riviä), ei satoja: numerointi alkaa alusta V-rivin kohdalla. |
+
+### 2) Hyöty: ennen/jälkeen
+
+| Mittari | Ennen | Jälkeen |
+| --- | --- | --- |
+| Rikkoutuneen rivin havaitseminen | vain kenttämäärä ja arvoalueet: yksittäinen muuttunut numero meni läpi | jokainen yksittäinen bittivirhe havaitaan |
+| Kadonneet rivit | ei havaita | lasketaan numeroiden aukoista ja näytetään |
+| Lopputyön ohjeen vaatimus (4.5 ja 7.4: virheentunnistus, kadonneet viestit) | ei täyttynyt | täyttyy, luvut raporttiin askeleesta 2 |
+
+**Rehellinen arvio:** USB-sarjayhteydellä virheitä tulee harvoin, joten odotettu tulos on 0 hylättyä. Arvo on siinä, että se on nyt mitattu eikä oletettu, ja että dashboard ei näytä rikkoutunutta mittausta oikeana.
+

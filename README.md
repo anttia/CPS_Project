@@ -107,7 +107,10 @@ Lampun logiikkaa (`lamp_logic.h`) voi testata PC:llä ilman Arduinoa simuloiduss
 ```
 cd firmware/luxlamppu/test
 gcc -std=c99 -Wall -Wextra -I.. test_lamp_logic.c -lm -o test && ./test
+gcc -std=c99 -Wall -Wextra -I.. test_protocol.c -o test_protocol && ./test_protocol
 ```
+
+Dashboardin puolen viestiprotokollan testi: `python dashboard/test_protokolla.py`.
 
 Testi tarkistaa, että säätö asettuu tavoitteeseen eri lampun vahvistuksilla värähtelemättä, palaa saavuttamattomasta tavoitteesta (anti-windup), sammuttaa lampun kirkkaassa huoneessa, ja että pitoaika ja animaatiot toimivat oikeaan aikaan.
 
@@ -119,7 +122,7 @@ Dashboard tallentaa kaiken vastaanotetun datan kansioon `dashboard/mittaukset/`,
 
 Sarjaportin nopeus on 9600 baudia (8N1).
 
-**Arduino → PC**, viisi kertaa sekunnissa: `pir,valo,kirkkaus,tavoite,tila,jannite_mV,virta_mA,teho_mW`, esimerkiksi `1,150,42,150,1,4987,412,2050`.
+**Arduino → PC**, viisi kertaa sekunnissa: `pir,valo,kirkkaus,tavoite,tila,jannite_mV,virta_mA,teho_mW,numero*HH`, esimerkiksi `1,150,42,150,1,4987,412,2050,17*32`.
 
 - `pir`: 1 kun liikettä havaitaan, muuten 0
 - `valo`: suodatettu valoanturin ADC-lukema 0–1023
@@ -127,6 +130,10 @@ Sarjaportin nopeus on 9600 baudia (8N1).
 - `tavoite`: säädön tavoite valoanturin yksiköissä
 - `tila`: 0 = pois, 1 = säätö, 2 = sammumisanimaatio, 3 = heräämisanimaatio
 - `jannite_mV`, `virta_mA`, `teho_mW`: INA219:n mittaama nauhan syöttö; -1, jos INA219 ei vastaa
+- `numero`: rivin järjestysnumero 0–255, kasvaa joka rivillä ja kiertää ympäri
+- `*HH`: tarkistussumma kahtena heksamerkkinä, kaikkien `*`-merkkiä edeltävien tavujen XOR kuten GPS:n NMEA-lauseissa (`firmware/luxlamppu/protocol.h`)
+
+Dashboard hylkää rivin, jonka tarkistussumma ei täsmää, ja laskee numeroiden aukoista kadonneet rivit. Molemmat näkyvät Järjestelmä-välilehdellä. XOR havaitsee jokaisen yksittäisen bittivirheen, mutta ei kahta samaa bittiä kahdessa eri tavussa: se riittää USB-sarjayhteydelle, jossa virheet ovat harvinaisia, mutta ei korvaa CRC:tä häiriöisellä linjalla.
 
 Dashboard ymmärtää myös vanhat muodot `pir,valo` ja `pir,valo,kirkkaus,jannite_mV,virta_mA,teho_mW`.
 

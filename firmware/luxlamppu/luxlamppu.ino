@@ -21,9 +21,10 @@
  * pääsilmukka on käsitellyt liikkeen, ja laskee, kun PIR:n signaali laskee (validointia varten).
  *
  * Lähettää viisi kertaa sekunnissa rivin
- *     pir,valo,kirkkaus,tavoite,tila,jannite_mV,virta_mA,teho_mW
+ *     pir,valo,kirkkaus,tavoite,tila,jannite_mV,virta_mA,teho_mW,numero*HH
  * missä tila on 0 = pois, 1 = säätö, 2 = sammumisanimaatio, 3 = heräämisanimaatio.
- * Jos INA219 ei vastaa, sen kentät ovat -1.
+ * Jos INA219 ei vastaa, sen kentät ovat -1. numero (0–255) kasvaa joka rivillä, ja HH on
+ * tarkistussumma (ks. protocol.h): dashboard hylkää rikkoutuneet rivit ja laskee kadonneet.
  * Käynnistyessään se lähettää kerran rivin  V,<käännöspäivä> <käännösaika>,
  * josta dashboard näkee, mikä firmwaren versio kortilla on.
  *
@@ -55,6 +56,7 @@
 #include <Wire.h>
 #include <Adafruit_INA219.h>
 #include "lamp_logic.h"
+#include "protocol.h"
 
 #define NUM_LEDS          39     // nauhan LEDien määrä
 #define CURRENT_LIMIT_MA  900    // virtabudjetti nauhalle: USB-breakout ja vähintään 1 A:n laturi
@@ -327,14 +329,18 @@ static void send_telemetry(void) {
         ma = lround(ina219.getCurrent_mA());
         mw = lround(ina219.getPower_mW());
     }
-    Serial.print(last_pir);                         Serial.print(',');
-    Serial.print(lamp_light(&lamp));                Serial.print(',');
-    Serial.print((display_pm + 5) / 10); Serial.print(',');
-    Serial.print(lamp.target);                      Serial.print(',');
-    Serial.print(lamp.state);                       Serial.print(',');
-    Serial.print(mv);                               Serial.print(',');
-    Serial.print(ma);                               Serial.print(',');
-    Serial.println(mw);
+    static uint8_t seq = 0;                   // rivin numero: aukoista näkee kadonneet rivit
+    long fields[] = { last_pir, lamp_light(&lamp), (display_pm + 5) / 10, lamp.target,
+                      lamp.state, mv, ma, mw, seq++ };
+    char line[72];                            // 9 kenttää × enintään 7 merkkiä + "*HH"
+    char *p = line;
+    for (uint8_t i = 0; i < sizeof fields / sizeof fields[0]; i++) {
+        if (i) *p++ = ',';
+        ltoa(fields[i], p, 10);
+        p += strlen(p);
+    }
+    frame_close(line);                        // lisää "*HH"
+    Serial.println(line);
 }
 
 void setup() {

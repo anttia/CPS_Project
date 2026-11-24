@@ -2,7 +2,11 @@
 """Luxlampun PC-dashboard.
 
 Lukee Arduinolta USB-sarjaportin kautta rivejä muodossa
-    pir,valo,kirkkaus,tavoite,tila,jannite_mV,virta_mA,teho_mW   (firmware/luxlamppu)
+    pir,valo,kirkkaus,tavoite,tila,jannite_mV,virta_mA,teho_mW,numero*HH   (firmware/luxlamppu)
+missä numero kasvaa joka rivillä ja HH on tarkistussumma (kaikkien '*'-merkkiä edeltävien
+tavujen XOR). Rivi, jonka summa ei täsmää, hylätään, ja numeroiden aukoista lasketaan
+kadonneet rivit. Tulokset näkyvät Järjestelmä-välilehdellä. Ymmärtää myös muodot
+    pir,valo,kirkkaus,tavoite,tila,jannite_mV,virta_mA,teho_mW
 tai vanhemmissa muodoissa
     pir,valo,kirkkaus,jannite_mV,virta_mA,teho_mW
     pir,valo                                                      (firmware/valo_liike_usb)
@@ -145,6 +149,7 @@ class State:
         self.write = None            # funktio, joka lähettää rivin Arduinolle
         self.stop_requested = threading.Event()   # "dashboard.py stop" pyysi sulkemaan
         self.diag = deque(maxlen=3600)  # (aika, tikit, ohitetut, viive_us, kuorma_pm, pir_n, pir_viive_us)
+        self.link = new_link_stats()     # viestiyhteyden laskurit (tarkistussumma ja numero)
 
     def add(self, t, sample, history=False):
         """Lisää näytteen. history=True: näyte on ladattu aiemmasta mittauksesta, joten se
@@ -245,6 +250,7 @@ class State:
             self.write = write
             self.last_sent = None             # uusi yhteys: asetukset lähetetään uudelleen
             self.need_config = connected
+            self.link = new_link_stats()       # Arduino käynnistyy uudelleen: numerointi alkaa alusta
 
     def set_desired(self, value):
         with self.lock:
@@ -260,7 +266,31 @@ class State:
             diag = [d for d in self.diag if d[0] >= now - DIAG_WINDOW_S]
             recent = sum(1 for t in reversed(self.times) if t >= now - 10)
             return dict(diag=diag, firmware=self.firmware, latest=self.latest,
-                        connected_at=self.connected_at, rate=recent / 10.0)
+                        connected_at=self.connected_at, rate=recent / 10.0, link=dict(self.link))
+
+    def count_frame(self, status, seq=None):
+        """Kirjaa vastaanotetun rivin: status "ok", "bad" (tarkistussumma ei täsmää) tai
+        "plain" (vanha muoto ilman tarkistussummaa). Numeron aukko = kadonneita rivejä."""
+        with self.lock:
+            link = self.link
+            if status == "bad":
+                if link["synced"]:            # käynnistyksen roskatavuja ennen ensimmäistä ehjää riviä ei lasketa
+                    link["bad"] += 1
+                return
+            link["synced"] = True
+            if status == "plain":
+                link["plain"] += 1
+                return
+            link["ok"] += 1
+            if seq is not None:
+                if link["last_seq"] is not None:
+                    link["lost"] += (seq - link["last_seq"] - 1) % 256
+                link["last_seq"] = seq
+
+    def restart_numbering(self):
+        """Arduino käynnistyi uudelleen (V-rivi): numerointi alkaa nollasta, ei aukkoa."""
+        with self.lock:
+            self.link["last_seq"] = None
 
     def snapshot(self, now):
         with self.lock:
@@ -270,9 +300,48 @@ class State:
                         energy_mwh=self.energy_mwh, desired=self.desired)
 
 
+def new_link_stats():
+    return dict(ok=0, bad=0, lost=0, plain=0, last_seq=None, synced=False)
+
+
+def frame_xor(text):
+    """Tarkistussumma kuten firmwaren protocol.h: kaikkien tavujen XOR."""
+    x = 0
+    for b in text.encode("ascii", errors="replace"):
+        x ^= b
+    return x
+
+
+def split_frame(line):
+    """'data*HH' -> (data, "ok" | "bad"); rivi ilman tarkistussummaa -> (rivi, "plain")."""
+    line = line.strip()
+    data, star, checksum = line.rpartition("*")
+    if not star:
+        return line, "plain"
+    try:
+        ok = len(checksum) == 2 and int(checksum, 16) == frame_xor(data)
+    except ValueError:
+        ok = False
+    return data, "ok" if ok else "bad"
+
+
+def make_frame(sample, seq):
+    """Telemetriarivi samassa muodossa kuin firmware lähettää (demo ja testit)."""
+    data = ",".join(str(v) for v in (sample["pir"], sample["light"], sample["bright"],
+                                     sample["target"], sample["state"], sample["mv"],
+                                     sample["ma"], sample["mw"], seq))
+    return f"{data}*{frame_xor(data):02X}"
+
+
 def parse_line(line):
     """Palauttaa näytteen (dict) tai None, jos rivi on vajaa tai rikki."""
     parts = line.strip().split(",")
+    seq = None
+    if len(parts) == 9:                   # viimeinen kenttä on rivin numero
+        seq = parts.pop()
+        if not seq.isdigit() or int(seq) > 255:
+            return None
+        seq = int(seq)
     if len(parts) not in (2, 6, 8):
         return None
     try:
@@ -283,7 +352,7 @@ def parse_line(line):
     if pir not in (0, 1) or not 0 <= light <= ADC_MAX:
         return None
     sample = dict(pir=pir, light=light, bright=None, target=None, state=None,
-                  mv=None, ma=None, mw=None)
+                  mv=None, ma=None, mw=None, seq=seq)
     if len(values) == 6:
         bright, mv, ma, mw = values[2:]
         target = state = None
@@ -353,6 +422,33 @@ def log_sample(log, t, s):
                   s["mv"], s["ma"], s["mw"]])
 
 
+def process_line(state, raw, log):
+    """Käsittelee yhden Arduinolta tulleen rivin: versio, ajoitusmittarit tai telemetria."""
+    v = raw.find("V,")                    # alussa voi olla käynnistyksen roskatavuja
+    if v >= 0:
+        with state.lock:
+            state.firmware = raw[v + 2:].strip()   # firmwaren käännösaika
+        state.restart_numbering()
+        return
+    if raw.startswith("#diag"):
+        diag = parse_diag(raw)
+        if diag:
+            state.add_diag(time.time(), diag)
+        return
+    if not raw.strip():
+        return
+    data, status = split_frame(raw)
+    sample = parse_line(data) if status != "bad" else None
+    if sample is None:
+        # Ehjä tarkistussumma mutta mahdoton sisältö lasketaan myös hylätyksi
+        state.count_frame("bad")
+        return
+    state.count_frame(status, sample["seq"])
+    now = time.time()
+    state.add(now, sample)
+    log_sample(log, now, sample)
+
+
 def serial_reader(port, baud, state, log):
     import serial
     while True:
@@ -374,22 +470,7 @@ def serial_reader(port, baud, state, log):
             with ser:
                 while True:
                     raw = ser.readline().decode("ascii", errors="ignore")
-                    v = raw.find("V,")        # alussa voi olla käynnistyksen roskatavuja
-                    if v >= 0:
-                        with state.lock:
-                            state.firmware = raw[v + 2:].strip()   # firmwaren käännösaika
-                        continue
-                    if raw.startswith("#diag"):
-                        diag = parse_diag(raw)
-                        if diag:
-                            state.add_diag(time.time(), diag)
-                        continue
-                    sample = parse_line(raw)
-                    if sample is None:
-                        continue      # Arduinon käynnistyksen ensimmäiset rivit voivat olla vajaita
-                    now = time.time()
-                    state.add(now, sample)
-                    log_sample(log, now, sample)
+                    process_line(state, raw, log)
         except (serial.SerialException, OSError) as e:
             state.set_connection(f"Ei yhteyttä: {port}",
                                  f"Yhteys sarjaporttiin {port} katkesi.\n"
@@ -526,11 +607,12 @@ def demo_reader(state, log, sim):
     with state.lock:
         state.firmware = "demo"
     start, next_diag, pir_n, pir_max, last_pir = time.time(), time.time() + 1, 0, 0, 0
+    seq = 0
     while True:
         now = time.time()
         sample = sim.step(now)
-        state.add(now, sample)
-        log_sample(log, now, sample)
+        process_line(state, make_frame(sample, seq), log)   # sama polku kuin sarjaportin riveillä
+        seq = (seq + 1) % 256
         if sample["pir"] and not last_pir:          # simuloitu PIR-viive liikkeen alussa
             pir_n += 1
             pir_max = max(pir_max, random.randint(50, 9500))
@@ -916,8 +998,16 @@ def make_system_updater(state, ax_load, ax_lat, art):
         art["latency"].set_data(rel, lat_ms)
         ax_lat.set_ylim(0, max(TICK_MS * 1.3, max(lat_ms, default=0) * 1.2))
 
+        latest = s["latest"]
+        if latest is None or latest["mw"] is None:
+            ina = "ei tietoa"
+        elif latest["mw"] < 0:
+            ina = "ei vastaa"
+        else:
+            ina = "toimii"
         art["line1"].set_text(f"Firmware käännetty: {s['firmware'] or '–'}    "
-                              f"Telemetria: {fmt_num(s['rate'], 1)} riviä/s (tavoite 5)")
+                              f"Telemetria: {fmt_num(s['rate'], 1)} riviä/s (tavoite 5)    "
+                              f"INA219: {ina}")
         fresh = diag and now - diag[-1][0] <= DIAG_STALE_S
         if not diag or not fresh:
             waited = s["connected_at"] is not None and now - s["connected_at"] > DIAG_STALE_S
@@ -945,14 +1035,16 @@ def make_system_updater(state, ax_load, ax_lat, art):
                 art["line4"].set_text(f"PIR-viive liikkeestä käsittelyyn: suurin "
                                       f"{fmt_num(last[6] / 1000, 2)} ms, liikkeitä {last[5]} "
                                       "(käynnistyksestä)")
-        latest = s["latest"]
-        if latest is None or latest["mw"] is None:
-            ina = "ei tietoa"
-        elif latest["mw"] < 0:
-            ina = "ei vastaa"
+        link = s["link"]
+        if link["ok"]:
+            total = link["ok"] + link["lost"]
+            art["line5"].set_text(f"Viestiyhteys: {link['ok']} riviä tarkistettu, hylätty "
+                                  f"{link['bad']} (rikkoutunut rivi), kadonnut {link['lost']} "
+                                  f"({fmt_num(100 * link['lost'] / total, 2)} %) tämän yhteyden aikana")
+        elif link["plain"]:
+            art["line5"].set_text("Viestiyhteys: firmware ei lähetä tarkistussummaa (vanha versio)")
         else:
-            ina = "toimii"
-        art["line5"].set_text(f"INA219: {ina}")
+            art["line5"].set_text("Viestiyhteys: odotetaan rivejä...")
         art["note"].set_text("Mittarit laskee firmware itse Timer1:n 4 µs:n tarkkuudella ja lähettää "
                              "kerran sekunnissa. Virallinen todiste: validointi/validoi_ajoitus.py.")
 

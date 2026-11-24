@@ -24,3 +24,9 @@ res, checks = analyze(old)
 assert abs(res["telemetria_hz"] - 5) < 0.01 and res["vali_max_ms"] > 220, res
 assert not all(ok for _, ok, _ in checks)
 print("validoi_ajoitus: vanhan firmwaren vertailu läpäisty")
+
+# Uusi telemetriamuoto (numero ja tarkistussumma) tunnistetaan samoin
+from validoi_ajoitus import is_telemetry
+assert is_telemetry("1,150,42,150,1,4987,412,2050,17*32") and is_telemetry("0,10,50,150,1,5000,100,500")
+assert not is_telemetry("#diag,1200,0,12,41")
+print("validoi_ajoitus: uusi telemetriamuoto tunnistetaan")

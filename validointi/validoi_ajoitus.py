@@ -55,8 +55,10 @@ def parse_diag(line):
 
 
 def is_telemetry(line):
-    parts = line.strip().split(",")
-    return len(parts) == 8 and all(re.fullmatch(r"-?\d+", p) for p in parts)
+    """Telemetriarivi: 8 kenttää (vanha muoto) tai 9 kenttää ja tarkistussumma (data*HH)."""
+    data = line.strip().split("*")[0]
+    parts = data.split(",")
+    return len(parts) in (8, 9) and all(re.fullmatch(r"-?\d+", p) for p in parts)
 
 
 def fit_slope(xs, ys):
