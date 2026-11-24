@@ -67,6 +67,12 @@ Keskeytysrutiini on käännettynä 29 käskyä, noin 62 kellojaksoa vasteaikoine
 
 Timer1:n uudelleenkäyttö tarkoittaa, että `analogWrite` D9:ssä ja D10:ssä ei toimi. Arduinon Timer0 jää toistaiseksi käyntiin, koska Wire-kirjaston aikakatkaisu käyttää sitä.
 
+## Validointi
+
+Jokaisella firmwaren muutoksella on laudalla tehtävä testi ja mittari, joka näyttää muutoksen hyödyn. Ne on kuvattu tiedostossa [VALIDOINTI.md](VALIDOINTI.md), ja skriptit ovat kansiossa `validointi/`. PR yhdistetään päähaaraan vasta laudalla tehdyn testin jälkeen.
+
+Pinni D8 on varattu tikkimerkille: se vaihtaa tilaansa jokaisessa Timer1-keskeytyksessä (50 Hz).
+
 ## Logiikan testi
 
 Lampun logiikkaa (`lamp_logic.h`) voi testata PC:llä ilman Arduinoa simuloidussa huoneessa, jossa anturin lukema on taustavalo plus LEDin vaikutus:
@@ -102,3 +108,4 @@ Dashboard ymmärtää myös vanhat muodot `pir,valo` ja `pir,valo,kirkkaus,janni
 - `T,<0-1023>`: tavoite valoanturin yksiköissä
 - `H,<1-3600>`: pitoaika sekunteina
 - `K,<1-50>`: säätimen kerroin (promillea kirkkautta per ADC-yksikkö per 100 ms:n askel)
+- `D,<0|1>`: ajoituksen validointirivi pois/päälle. Päällä ollessa Arduino lähettää kerran sekunnissa rivin `#diag,tikit,ohitetut,suurin_viive_us,kuorma_promillea`, jonka dashboard ohittaa (ks. [VALIDOINTI.md](VALIDOINTI.md))
