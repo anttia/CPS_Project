@@ -1,4 +1,5 @@
-# Dashboardin mittaustiedostot
+# Dashboardin mittaustiedostot (vanhat lokit myös dashboard-kansion juuressa)
+dashboard/mittaukset/
 mittaus_*.csv
 __pycache__/
 *.pyc

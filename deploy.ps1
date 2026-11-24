@@ -56,7 +56,7 @@ if ($proc.HasExited) {
     Write-Host "Dashboard sulkeutui heti (exit $($proc.ExitCode)). Aja 'python dashboard.py' nähdäksesi virheen." -ForegroundColor Red
     exit 1
 }
-$log = Get-ChildItem $dashDir -Filter "mittaus_*.csv" | Where-Object { $_.LastWriteTime -ge $started } |
+$log = Get-ChildItem (Join-Path $dashDir "mittaukset") -Filter "mittaus_*.csv" -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $started } |
        Sort-Object LastWriteTime | Select-Object -Last 1
 $rows = if ($log) { @(Get-Content $log.FullName | Select-Object -Skip 1) } else { @() }
 if ($rows.Count -gt 0) {
