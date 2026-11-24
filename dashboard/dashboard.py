@@ -34,6 +34,11 @@ Käyttö:
     python dashboard.py --demo          # testidata ilman Arduinoa (3 h valmiina historiana)
     python dashboard.py --ei-historiaa  # älä lataa aiempia mittauksia
     python dashboard.py --pitoaika 20   # lyhyt pitoaika testiin (oletus 180 s)
+    python dashboard.py stop            # sulje käynnissä oleva dashboard (vapauttaa sarjaportin)
+
+Käynnissä oleva dashboard kuuntelee pysäytyskäskyä paikallisessa TCP-portissa
+CONTROL_PORT (vain 127.0.0.1). "stop" odottaa, kunnes dashboard on sulkeutunut,
+joten sen jälkeen sarjaportti on vapaa esimerkiksi firmwaren lataamiseen.
 """
 import argparse
 import bisect
@@ -42,6 +47,7 @@ import glob
 import os
 import math
 import random
+import socket
 import sys
 import threading
 import time
@@ -61,13 +67,17 @@ RANGES = [("2 min", 120), ("15 min", 900), ("1 h", 3600), ("3 h", 3 * 3600), ("1
 TICK_STEP = {120: 20, 900: 120, 3600: 600, 3 * 3600: 1800, 12 * 3600: 7200}   # aika-akselin jako (s)
 LONG_KEYS = ("t", "light", "bright", "pir", "pmean", "pmin", "pmax", "energy", "dur")
 ADC_MAX = 1023
-NO_DATA_S = 3            # näin pitkä tauko datassa näytetään virheenä
+UPDATE_S = 2.0           # näkymän päivitysväli (--paivitys): koko kuvan piirto vie ~200 ms, joten
+                         # tiheä päivitys varaa käyttöliittymän (data tallentuu silti 5 kertaa sekunnissa)
+NO_DATA_S = 3           # näin pitkä tauko datassa näytetään virheenä
 RETRY_S = 2              # kuinka usein porttia yritetään avata uudelleen
 SEND_MIN_INTERVAL_S = 0.15   # liukusäätimen komentoja korkeintaan tällä välillä
 RESEND_S = 1.0           # komento lähetetään uudelleen, jos Arduino ei ole ottanut sitä käyttöön
 DEFAULT_TARGET = 150     # tavoite valoanturin yksiköissä
 TARGET_MAX = 600         # liukusäätimen yläraja
 ANIM_S = 30.0            # animaation kesto (sama kuin firmwaren LAMP_ANIM_MS)
+CONTROL_PORT = 47219     # paikallinen portti, josta dashboard ottaa vastaan "stop"-käskyn
+STOP_WAIT_S = 10         # kuinka kauan "stop" odottaa dashboardin sulkeutumista
 STATE_NAMES = {0: "pois (ei liikettä)", 1: "säätö", 2: "sammumisanimaatio", 3: "heräämisanimaatio"}
 
 # Tumma teema
@@ -106,6 +116,7 @@ class State:
         self.last_data = None        # time.time() viimeisestä kelvollisesta rivistä
         self.connected_at = None
         self.status = "Odotetaan dataa..."
+        self.firmware = None         # firmwaren käännösaika (V-rivi) tai None
         self.error = None            # näkyvä virheilmoitus tai None
         self.energy_mwh = 0.0
         self._last_power_t = None
@@ -117,6 +128,7 @@ class State:
         self.last_send_t = 0.0
         self.need_config = False     # uusi yhteys: lähetä kaikki asetukset
         self.write = None            # funktio, joka lähettää rivin Arduinolle
+        self.stop_requested = threading.Event()   # "dashboard.py stop" pyysi sulkemaan
 
     def add(self, t, sample, history=False):
         """Lisää näytteen. history=True: näyte on ladattu aiemmasta mittauksesta, joten se
@@ -212,6 +224,7 @@ class State:
         with self.lock:
             self.status = status
             self.error = error
+            self.firmware = None     # Arduino käynnistyy uudelleen ja lähettää V-rivin
             self.connected_at = time.time() if connected else None
             self.write = write
             self.last_sent = None             # uusi yhteys: asetukset lähetetään uudelleen
@@ -318,6 +331,11 @@ def serial_reader(port, baud, state, log):
             with ser:
                 while True:
                     raw = ser.readline().decode("ascii", errors="ignore")
+                    v = raw.find("V,")        # alussa voi olla käynnistyksen roskatavuja
+                    if v >= 0:
+                        with state.lock:
+                            state.firmware = raw[v + 2:].strip()   # firmwaren käännösaika
+                        continue
                     sample = parse_line(raw)
                     if sample is None:
                         continue      # Arduinon käynnistyksen ensimmäiset rivit voivat olla vajaita
@@ -329,6 +347,60 @@ def serial_reader(port, baud, state, log):
                                  f"Yhteys sarjaporttiin {port} katkesi.\n"
                                  f"Onko USB-kaapeli irronnut? ({e})")
             time.sleep(RETRY_S)
+
+
+def start_control_server(state):
+    """Kuuntelee pysäytyskäskyä. Palauttaa False, jos portti on jo toisen dashboardin käytössä."""
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        srv.bind(("127.0.0.1", CONTROL_PORT))
+    except OSError:
+        srv.close()
+        return False
+    srv.listen(1)
+
+    def serve():
+        while True:
+            conn, _ = srv.accept()
+            with conn:
+                conn.settimeout(2)
+                try:
+                    command = conn.recv(64).decode("ascii", errors="ignore").strip()
+                    if command == "stop":
+                        conn.sendall(b"ok\n")
+                        state.stop_requested.set()
+                    elif command:
+                        conn.sendall(b"tuntematon komento\n")
+                except OSError:
+                    pass      # esim. "stop"-komennon tarkistusyhteys, joka sulkeutuu heti
+
+    threading.Thread(target=serve, daemon=True).start()
+    return True
+
+
+def send_stop():
+    """Pyytää käynnissä olevaa dashboardia sulkeutumaan ja odottaa, että se on sulkeutunut."""
+    try:
+        with socket.create_connection(("127.0.0.1", CONTROL_PORT), timeout=2) as conn:
+            conn.sendall(b"stop\n")
+            reply = conn.recv(64).decode("ascii", errors="ignore").strip()
+    except OSError:
+        print("Dashboard ei ole käynnissä.")
+        return 1
+    if reply != "ok":
+        print(f"Odottamaton vastaus: {reply!r}")
+        return 1
+    # Kun prosessi on sulkeutunut, portti ei enää ota yhteyksiä vastaan ja sarjaportti on vapaa
+    deadline = time.time() + STOP_WAIT_S
+    while time.time() < deadline:
+        try:
+            socket.create_connection(("127.0.0.1", CONTROL_PORT), timeout=0.5).close()
+        except OSError:
+            print("Dashboard suljettu.")
+            return 0
+        time.sleep(0.2)
+    print(f"Dashboard otti käskyn vastaan, mutta ei sulkeutunut {STOP_WAIT_S} sekunnissa.")
+    return 1
 
 
 class DemoSim:
@@ -592,12 +664,17 @@ def build_figure(state):
 
 
 def connect_controls(state, art):
-    art["slider"].on_changed(state.set_desired)
+    def set_target(value):
+        state.set_desired(value)
+        now = time.time()
+        sync_settings(state, state.snapshot(now), now)   # heti, ei vasta seuraavalla päivityksellä
+
+    art["slider"].on_changed(set_target)
 
     def use_current(_event):
-        latest = state.snapshot()["latest"]
+        latest = state.snapshot(time.time())["latest"]
         if latest:
-            art["slider"].set_val(min(TARGET_MAX, latest["light"]))   # kutsuu myös set_desired
+            art["slider"].set_val(min(TARGET_MAX, latest["light"]))   # kutsuu myös set_target
 
     art["button"].on_clicked(use_current)
 
@@ -641,6 +718,9 @@ def make_updater(state, ax, ax_b, ax_p, art):
     fills = {"motion": None, "band": None}
 
     def update(_frame):
+        if state.stop_requested.is_set():
+            plt.close(ax.figure)      # plt.show() palaa ja main() sulkee lokin
+            return []
         now = time.time()
         s = state.snapshot(now)
         v, span = s["view"], s["range_s"]
@@ -713,7 +793,8 @@ def make_updater(state, ax, ax_b, ax_p, art):
             art["mode"].set_text("")
             art["light"].set_text("Valoisuus: –")
             art["power_text"].set_text("")
-        art["status"].set_text(s["status"])
+        firmware = state.firmware
+        art["status"].set_text(s["status"] + (f"    Firmware käännetty: {firmware}" if firmware else ""))
 
         # Portti on auki, mutta dataa ei tule: väärä ohjelma, väärä nopeus tai kortti jumissa
         error = s["error"]
@@ -734,25 +815,36 @@ def make_updater(state, ax, ax_b, ax_p, art):
 
 def main():
     parser = argparse.ArgumentParser(description="Luxlampun PC-dashboard")
+    parser.add_argument("komento", nargs="?", choices=["stop"],
+                        help="stop: sulje käynnissä oleva dashboard")
     parser.add_argument("--port", help="sarjaportti, esim. COM3 tai /dev/ttyACM0")
     parser.add_argument("--baud", type=int, default=9600)
     parser.add_argument("--demo", action="store_true", help="testidata ilman Arduinoa")
     parser.add_argument("--pitoaika", type=int, default=180,
                         help="sekunnit ilman liikettä ennen sammumista (1–3600, oletus 180)")
+    parser.add_argument("--paivitys", type=float, default=UPDATE_S,
+                        help=f"näkymän päivitysväli sekunteina (0,2–60, oletus {UPDATE_S:g})")
     parser.add_argument("--ki", type=int, help="säätimen kerroin 1–50 (oletus: Arduinon oma, 3)")
     parser.add_argument("--log", help="CSV-tiedosto, johon data tallennetaan "
                         "(oletus mittaus_<aika>.csv, demossa demo_<aika>.csv)")
     parser.add_argument("--ei-historiaa", action="store_true",
                         help="älä lataa aiempia mittauksia mittaus_*.csv-tiedostoista")
     args = parser.parse_args()
+    if args.komento == "stop":
+        sys.exit(send_stop())
     if args.log is None:
         args.log = f"{'demo' if args.demo else 'mittaus'}_{datetime.now():%Y%m%d_%H%M%S}.csv"
     if not 1 <= args.pitoaika <= 3600:
         sys.exit("--pitoaika pitää olla 1–3600 sekuntia")
+    if not 0.2 <= args.paivitys <= 60:
+        sys.exit("--paivitys pitää olla 0,2–60 sekuntia")
     if args.ki is not None and not 1 <= args.ki <= 50:
         sys.exit("--ki pitää olla 1–50")
 
     state = State()
+    if not start_control_server(state):
+        print(f"Varoitus: portti {CONTROL_PORT} on varattu (toinen dashboard käynnissä?), "
+              "joten tätä dashboardia ei voi sulkea komennolla 'dashboard.py stop'.")
     state.hold_s = args.pitoaika
     state.ki = args.ki
     now = time.time()
@@ -785,7 +877,7 @@ def main():
     fig, ax, ax_b, ax_p, art = build_figure(state)
     connect_controls(state, art)
     update = make_updater(state, ax, ax_b, ax_p, art)
-    _anim = FuncAnimation(fig, update, interval=200, cache_frame_data=False)
+    _anim = FuncAnimation(fig, update, interval=int(args.paivitys * 1000), cache_frame_data=False)
     plt.show()
     logfile.close()
 

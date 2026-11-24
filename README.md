@@ -31,6 +31,13 @@ Grove-johtojen valkoinen johdin (NC) jää kytkemättä. PIR:n jumpperi Re_trig-
 ## Käyttö
 
 1. **Firmware:** asenna Arduino IDE:n Library Managerista *Adafruit INA219*. Avaa `firmware/luxlamppu/luxlamppu.ino`, aseta `NUM_LEDS` nauhan LEDien määräksi, valitse kortiksi Arduino Uno ja oikea portti, ja paina Upload. Valoanturi ja LED-nauha käyttävät rekistereitä suoraan; INA219 luetaan toistaiseksi kirjastolla.
+   **Ilman Arduino IDE:tä:** `deploy.ps1` sulkee käynnissä olevan dashboardin, kääntää ja lataa firmwaren [arduino-cli:llä](https://arduino.github.io/arduino-cli/) (portti tunnistetaan automaattisesti) ja käynnistää dashboardin uudelleen, jolloin myös dashboardin uusin koodi on käytössä:
+   ```
+   .\deploy.ps1                          # luxlamppu
+   .\deploy.ps1 -Sketch cps_blink_colors # muu sketsi firmware-kansiosta
+   .\deploy.ps1 -NoDashboard             # vain firmware
+   ```
+   Tarvitaan kerran: `scoop install arduino-cli`, `arduino-cli core install arduino:avr` ja `arduino-cli lib install "Adafruit INA219"`. Dashboardin tilarivillä näkyy firmwaren käännösaika, josta näkee, että uusi versio on kortilla.
 2. **Dashboard:**
    ```
    cd dashboard
@@ -38,7 +45,11 @@ Grove-johtojen valkoinen johdin (NC) jää kytkemättä. PIR:n jumpperi Re_trig-
    python dashboard.py              # etsii Arduinon portin automaattisesti
    python dashboard.py --port COM3  # tai portti käsin
    python dashboard.py --demo       # testidata ilman Arduinoa (3 h valmiina historiana)
+   python dashboard.py stop         # sulje käynnissä oleva dashboard toisesta päätteestä
+   pythonw dashboard.py             # Windows: käynnistä ilman konsoli-ikkunaa
+   python dashboard.py --paivitys 5 # näkymän päivitysväli sekunteina (oletus 2; data tallentuu silti 5 kertaa sekunnissa)
    ```
+   `stop` lähettää käskyn käynnissä olevalle dashboardille paikallisen TCP-portin 47219 kautta ja odottaa, että se on sulkeutunut. Sen jälkeen sarjaportti on vapaa, esimerkiksi firmwaren lataamiseen.
    Sulje Arduino IDE:n Serial Monitor ennen dashboardin käynnistystä: sama portti ei voi olla auki kahdessa ohjelmassa. Jos portti on varattu, puuttuu tai data lakkaa tulemasta, dashboard näyttää punaisen ilmoituksen ja yhdistää automaattisesti uudelleen, kun portti vapautuu.
 
 Dashboardin alareunan liukusäädin asettaa **tavoitteen valoanturin yksiköissä** (vihreä katkoviiva), ja Arduino säätää LED-nauhan kirkkautta (violetti käyrä) niin, että anturin lukema pysyy tavoitteessa. Painike "Käytä nykyistä lukemaa" asettaa tavoitteeksi anturin sen hetkisen lukeman. Dashboard lähettää tavoitteen ja pitoajan aina yhteyden alussa ja uudelleen, jos Arduinon ilmoittama tavoite ei vastaa liukusäädintä. "100 %" on suurin kirkkaus, jonka firmwaren virtabudjetti `CURRENT_LIMIT_MA` sallii valkoiselle.

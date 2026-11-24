@@ -20,6 +20,8 @@
  *     pir,valo,kirkkaus,tavoite,tila,jannite_mV,virta_mA,teho_mW
  * missä tila on 0 = pois, 1 = säätö, 2 = sammumisanimaatio, 3 = heräämisanimaatio.
  * Jos INA219 ei vastaa, sen kentät ovat -1.
+ * Käynnistyessään se lähettää kerran rivin  V,<käännöspäivä> <käännösaika>,
+ * josta dashboard näkee, mikä firmwaren versio kortilla on.
  *
  * Vastaanottaa dashboardilta komennot:
  *     T,<0-1023>    tavoite valoanturin yksiköissä
@@ -180,6 +182,11 @@ void setup() {
     max_level = compute_max_level();
     lamp_init(&lamp, millis());
     ws_show();                                // kaikki LEDit pois
+
+    Serial.print(F("V,"));                    // käännösaika: dashboard näyttää, mikä versio on kortilla
+    Serial.print(F(__DATE__));
+    Serial.print(' ');
+    Serial.println(F(__TIME__));
 }
 
 void loop() {
