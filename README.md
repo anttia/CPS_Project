@@ -6,7 +6,7 @@ Cyber-Physical Systems -kurssin lopputyö. Lamppu (osoitettava LED-nauha) pitä�
 
 | Kansio | Sisältö |
 | --- | --- |
-| `firmware/luxlamppu/` | Arduino Uno R3: suljettu valon säätö, PIR-sammutus ja -herätys animaatioilla, INA219-virtamittaus |
+| `firmware/luxlamppu/` | Arduino Uno R3: suljettu valon säätö, PIR-sammutus ja -herätys animaatioilla, INA219-virtamittaus, ajoitus omalla Timer1-keskeytyksellä |
 | `firmware/luxlamppu/lamp_logic.h` | lampun logiikka ilman laitteistoa: suodatus, I-säädin, tilakone, animaatiot |
 | `firmware/luxlamppu/test/` | logiikan testi PC:llä simuloidussa huoneessa |
 | `firmware/valo_liike_usb/` | varhainen testi: lukee vain PIR- ja valoanturin ja lähettää arvot USB:n kautta |
@@ -44,6 +44,28 @@ Grove-johtojen valkoinen johdin (NC) jää kytkemättä. PIR:n jumpperi Re_trig-
 Dashboardin alareunan liukusäädin asettaa **tavoitteen valoanturin yksiköissä** (vihreä katkoviiva), ja Arduino säätää LED-nauhan kirkkautta (violetti käyrä) niin, että anturin lukema pysyy tavoitteessa. Painike "Käytä nykyistä lukemaa" asettaa tavoitteeksi anturin sen hetkisen lukeman. Dashboard lähettää tavoitteen ja pitoajan aina yhteyden alussa ja uudelleen, jos Arduinon ilmoittama tavoite ei vastaa liukusäädintä. "100 %" on suurin kirkkaus, jonka firmwaren virtabudjetti `CURRENT_LIMIT_MA` sallii valkoiselle.
 
 Pitoajan ja säätimen kertoimen voi antaa käynnistyksessä, esim. `python dashboard.py --pitoaika 20 --ki 3`. Lyhyt pitoaika on kätevä animaatioiden testaamiseen.
+
+## Ajoitus: Timer1 ja keskeytys
+
+Firmware ei käytä Arduinon `millis()`-funktiota. Ajan perusyksikkö on oma 10 ms:n tikki Timer1:ltä:
+
+- Timer1 on CTC-tilassa: laskuri kasvaa 4 µs:n askelin ja nollautuu, kun se saavuttaa OCR1A:n. Samalla syntyy vertailukeskeytys.
+- Keskeytysrutiini `ISR(TIMER1_COMPA_vect)` vain kasvattaa `volatile`-tikkilaskuria. Pääsilmukka lukee laskurin `ATOMIC_BLOCK`issa ja ajaa tehtävät tikkien mukaan: säätö 10 tikin (100 ms), animaatio 2 tikin (20 ms) ja telemetria 20 tikin (200 ms) välein.
+- Jakso: 16 MHz / 64 = 250 kHz → 4 µs per askel; 10 ms / 4 µs = 2500 askelta → OCR1A = 2499.
+
+| Rekisteri | Arvo | Bitit ja syy |
+| --- | --- | --- |
+| TCCR1A | 0x00 | COM1A/B = 00: OC1A/OC1B-pinnit (D9, D10) irti ajastimesta; WGM11:10 = 00 |
+| TCCR1B | 0x0B | WGM13:12 = 01 → tila 4 (CTC, TOP = OCR1A); CS12:10 = 011 → esijakaja 64 |
+| OCR1A | 2499 | vertailuarvo: 2500 askelta × 4 µs = 10 ms |
+| TCNT1 | 0 | laskuri nollataan ennen käynnistystä |
+| TIFR1 | OCF1A = 1 | vanha vertailulippu nollataan kirjoittamalla 1 ennen keskeytyksen sallimista |
+| TIMSK1 | 0x02 | OCIE1A = 1: vertailukeskeytys A päälle |
+| SREG | I = 1 | globaali keskeytyslupa (Arduinon `init()` asettaa, `timer1_init()` palauttaa) |
+
+Keskeytysrutiini on käännettynä 29 käskyä, noin 62 kellojaksoa vasteaikoineen, eli noin 4 µs joka 10 ms (0,04 % suoritinajasta). LED-nauhan päivitys estää keskeytykset noin 1,2 ms:ksi. Tikki ei silti katoa: vertailulippu jää odottamaan, ja keskeytysrutiini ajetaan heti päivityksen jälkeen. Pääsilmukka lukee laskuria eikä pelkkää lippua, joten myöhästynytkään tikki ei katoa.
+
+Timer1:n uudelleenkäyttö tarkoittaa, että `analogWrite` D9:ssä ja D10:ssä ei toimi. Arduinon Timer0 jää toistaiseksi käyntiin, koska Wire-kirjaston aikakatkaisu käyttää sitä.
 
 ## Logiikan testi
 
