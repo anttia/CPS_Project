@@ -17,3 +17,10 @@ records.append((601.0, f"#diag,{ticks + 103},3,9500,812"))   # 3 ohitettua tikki
 res, checks = analyze(records)
 assert res["myohastyneet"] == 3 and not all(ok for _, ok, _ in checks)
 print("validoi_ajoitus: analyysin testit läpäisty")
+
+# Vanha firmware (ei #diag-rivejä): telemetrian välit lasketaan silti vertailua varten
+old = [(i * 0.2 + (0.03 if i % 10 == 0 else 0), "0,10,50,150,2,5000,100,500") for i in range(1000)]
+res, checks = analyze(old)
+assert abs(res["telemetria_hz"] - 5) < 0.01 and res["vali_max_ms"] > 220, res
+assert not all(ok for _, ok, _ in checks)
+print("validoi_ajoitus: vanhan firmwaren vertailu läpäisty")

@@ -13,7 +13,9 @@ Mitä tarkistetaan:
   1. Tikin taajuus PC:n kelloon verrattuna (tavoite 100 Hz, Unon resonaattori ±0,5 %).
      Tikkilaskurin kasvu sovitetaan suoraksi PC:n aikaleimoja vasten, joten sarjaportin
      viiveen vaihtelu keskiarvoistuu pois.
-  2. Telemetrian tahti (tavoite 5 riviä/s).
+  2. Telemetrian tahti (tavoite 5 riviä/s) ja rivien välien vaihtelu (hajonta, 99. persentiili,
+     suurin). Tämä mitataan PC:n kellolla, joten se toimii myös vanhalla millis()-firmwarella:
+     aja skripti ensin päähaaran firmwarella (ennen) ja sitten uudella (jälkeen).
   3. Ohitetut tikit: pääsilmukan pitää ehtiä käsitellä jokainen tikki (tavoite 0).
   4. Suurin viive tikistä työn alkuun (tavoite < 10 ms eli alle yhden tikin: jokainen tehtävä
      alkaa sen tikin aikana, jolle se kuuluu). Lepotilassa viive on noin 10–20 µs;
@@ -70,8 +72,22 @@ def analyze(records, wall_clock=True):
     diags = [(t, d) for t, line in records if (d := parse_diag(line))]
     telem = [t for t, line in records if is_telemetry(line)]
     res, checks = {}, []
+    if wall_clock and len(telem) >= 3:
+        # Telemetriarivien välit PC:n kellolla: toimii myös vanhalla firmwarella, jossa ei ole
+        # #diag-rivejä, joten tästä saadaan ennen/jälkeen-vertailu.
+        gaps = sorted((b - a) * 1000 for a, b in zip(telem, telem[1:]))
+        mean = sum(gaps) / len(gaps)
+        res["telemetria_hz"] = 1000 / mean
+        res["vali_ka_ms"] = mean
+        res["vali_hajonta_ms"] = (sum((g - mean) ** 2 for g in gaps) / len(gaps)) ** 0.5
+        res["vali_p99_ms"] = gaps[min(len(gaps) - 1, int(0.99 * len(gaps)))]
+        res["vali_max_ms"] = gaps[-1]
+        checks.append(("Telemetria 5 riviä/s ±2 %", abs(res["telemetria_hz"] / TELEMETRY_HZ - 1) <= 0.02,
+                       f"{res['telemetria_hz']:.3f} riviä/s"))
     if len(diags) < 2:
-        return res, [("Validointirivejä (#diag) vähintään 2", False, f"{len(diags)} kpl")]
+        checks.append(("Validointirivejä (#diag) vähintään 2 (vanha firmware: ei ole)", False,
+                       f"{len(diags)} kpl"))
+        return res, checks
 
     res["diag_rivit"] = len(diags)
     res["myohastyneet"] = diags[-1][1][1] - diags[0][1][1]
@@ -89,11 +105,6 @@ def analyze(records, wall_clock=True):
         checks.append((f"Tikin taajuus {TICK_HZ:.0f} Hz ±{MAX_RATE_ERROR_PPM / 1e4:.1f} %",
                        abs(res["virhe_ppm"]) <= MAX_RATE_ERROR_PPM,
                        f"{rate:.4f} Hz ({res['virhe_ppm']:+.0f} ppm)"))
-        if len(telem) >= 2:
-            res["telemetria_hz"] = (len(telem) - 1) / (telem[-1] - telem[0])
-            checks.append(("Telemetria 5 riviä/s ±2 %",
-                           abs(res["telemetria_hz"] / TELEMETRY_HZ - 1) <= 0.02,
-                           f"{res['telemetria_hz']:.3f} riviä/s"))
     else:
         steps = [b[1][0] - a[1][0] for a, b in zip(diags, diags[1:])]
         checks.append(("Validointirivi 100 tikin välein", all(s == 100 for s in steps),
