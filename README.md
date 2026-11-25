@@ -47,16 +47,16 @@ Grove-johtojen valkoinen johdin (NC) jää kytkemättä. PIR:n jumpperi Re_trig-
    python dashboard.py --demo       # testidata ilman Arduinoa (3 h valmiina historiana)
    python dashboard.py stop         # sulje käynnissä oleva dashboard toisesta päätteestä
    pythonw dashboard.py             # Windows: käynnistä ilman konsoli-ikkunaa
-   python dashboard.py --paivitys 5 # näkymän päivitysväli sekunteina (oletus 2; data tallentuu silti 5 kertaa sekunnissa)
+   python dashboard.py --refresh 5  # näkymän päivitysväli sekunteina (oletus 2; data tallentuu silti 5 kertaa sekunnissa)
    ```
    `stop` lähettää käskyn käynnissä olevalle dashboardille paikallisen TCP-portin 47219 kautta ja odottaa, että se on sulkeutunut. Sen jälkeen sarjaportti on vapaa, esimerkiksi firmwaren lataamiseen.
    Sulje Arduino IDE:n Serial Monitor ennen dashboardin käynnistystä: sama portti ei voi olla auki kahdessa ohjelmassa. Jos portti on varattu, puuttuu tai data lakkaa tulemasta, dashboard näyttää punaisen ilmoituksen ja yhdistää automaattisesti uudelleen, kun portti vapautuu.
 
-Dashboardissa on kaksi välilehteä. **Lamppu** näyttää valoisuuden, tavoitteen, LED-kirkkauden, liikkeen ja tehon. **Järjestelmä** näyttää firmwaren omat ajoitusmittarit: suoritinkuorman ja suurimman viiveen tikistä työhön ajan funktiona (10 min), ohitetut tikit, PIR:n viiveen (kun firmware mittaa sen), telemetrian tahdin, firmwaren version ja INA219:n tilan. Dashboard kytkee mittarit päälle komennolla `D,1` aina yhteyden alussa. Vanha firmware ei lähetä niitä, ja välilehti kertoo sen. Virallinen todiste ajoituksesta on edelleen `validointi/validoi_ajoitus.py` (ks. [VALIDOINTI.md](VALIDOINTI.md)).
+Dashboardin käyttöliittymä on englanniksi, koska kurssi on englanninkielinen. Siinä on kaksi välilehteä. **Lamp** näyttää valoisuuden, tavoitteen, LED-kirkkauden, liikkeen ja tehon. **System** näyttää firmwaren omat ajoitusmittarit: suoritinkuorman ja suurimman viiveen tikistä työhön ajan funktiona (10 min), ohitetut tikit, PIR:n viiveen (kun firmware mittaa sen), telemetrian tahdin, firmwaren version ja INA219:n tilan. Dashboard kytkee mittarit päälle komennolla `D,1` aina yhteyden alussa. Vanha firmware ei lähetä niitä, ja välilehti kertoo sen. Virallinen todiste ajoituksesta on edelleen `validointi/validoi_ajoitus.py` (ks. [VALIDOINTI.md](VALIDOINTI.md)).
 
-Dashboardin alareunan liukusäädin asettaa **tavoitteen valoanturin yksiköissä** (vihreä katkoviiva), ja Arduino säätää LED-nauhan kirkkautta (violetti käyrä) niin, että anturin lukema pysyy tavoitteessa. Painike "Käytä nykyistä lukemaa" asettaa tavoitteeksi anturin sen hetkisen lukeman. Dashboard lähettää tavoitteen ja pitoajan aina yhteyden alussa ja uudelleen, jos Arduinon ilmoittama tavoite ei vastaa liukusäädintä. "100 %" on suurin kirkkaus, jonka firmwaren virtabudjetti `CURRENT_LIMIT_MA` sallii valkoiselle.
+Dashboardin alareunan liukusäädin asettaa **tavoitteen valoanturin yksiköissä** (vihreä katkoviiva), ja Arduino säätää LED-nauhan kirkkautta (violetti käyrä) niin, että anturin lukema pysyy tavoitteessa. Painike "Use current reading" asettaa tavoitteeksi anturin sen hetkisen lukeman. Dashboard lähettää tavoitteen ja pitoajan aina yhteyden alussa ja uudelleen, jos Arduinon ilmoittama tavoite ei vastaa liukusäädintä. "100 %" on suurin kirkkaus, jonka firmwaren virtabudjetti `CURRENT_LIMIT_MA` sallii valkoiselle.
 
-Pitoajan ja säätimen kertoimen voi antaa käynnistyksessä, esim. `python dashboard.py --pitoaika 20 --ki 3`. Lyhyt pitoaika on kätevä animaatioiden testaamiseen.
+Pitoajan ja säätimen kertoimen voi antaa käynnistyksessä, esim. `python dashboard.py --hold-time 20 --ki 3`. Vanhat suomenkieliset valitsimet (`--pitoaika`, `--paivitys`, `--ei-historiaa`) toimivat edelleen. Lyhyt pitoaika on kätevä animaatioiden testaamiseen.
 
 ## Ajoitus: Timer1 ja keskeytys
 
@@ -116,7 +116,7 @@ Testi tarkistaa, että säätö asettuu tavoitteeseen eri lampun vahvistuksilla 
 
 Dashboard tallentaa kaiken vastaanotetun datan kansioon `dashboard/mittaukset/`, tiedostoon `mittaus_<päivämäärä>.csv` (demossa `demo_<päivämäärä>.csv`). Kansio syntyy automaattisesti, eikä se mene Gitiin.
 
-**Aikaväli:** kaavioiden aikavälin voi valita painikkeilla 2 min, 15 min, 1 h, 3 h tai 12 h. Tunnin ja sitä pidemmillä aikaväleillä kaaviot näyttävät 10 sekunnin jaksojen keskiarvot, ja tehokaavion vaalea alue näyttää jakson pienimmän ja suurimman tehon. Tehokaavion kulmassa on näkyvän jakson keskiteho, suurin teho ja energia. Dashboard lataa käynnistyessään `dashboard/mittaukset/`-kansion `mittaus_*.csv`-tiedostoista viimeisten 12 tunnin mittaukset, joten historia säilyy uudelleenkäynnistyksen yli (`--ei-historiaa` ohittaa latauksen). Katkot mittauksissa näkyvät katkoina käyrissä.
+**Aikaväli:** kaavioiden aikavälin voi valita painikkeilla 2 min, 15 min, 1 h, 3 h tai 12 h. Tunnin ja sitä pidemmillä aikaväleillä kaaviot näyttävät 10 sekunnin jaksojen keskiarvot, ja tehokaavion vaalea alue näyttää jakson pienimmän ja suurimman tehon. Tehokaavion kulmassa on näkyvän jakson keskiteho, suurin teho ja energia. Dashboard lataa käynnistyessään `dashboard/mittaukset/`-kansion `mittaus_*.csv`-tiedostoista viimeisten 12 tunnin mittaukset, joten historia säilyy uudelleenkäynnistyksen yli (`--no-history` ohittaa latauksen). Katkot mittauksissa näkyvät katkoina käyrissä.
 
 ## Viestimuoto
 
@@ -133,7 +133,7 @@ Sarjaportin nopeus on 9600 baudia (8N1).
 - `numero`: rivin järjestysnumero 0–255, kasvaa joka rivillä ja kiertää ympäri
 - `*HH`: tarkistussumma kahtena heksamerkkinä, kaikkien `*`-merkkiä edeltävien tavujen XOR kuten GPS:n NMEA-lauseissa (`firmware/luxlamppu/protocol.h`)
 
-Dashboard hylkää rivin, jonka tarkistussumma ei täsmää, ja laskee numeroiden aukoista kadonneet rivit. Molemmat näkyvät Järjestelmä-välilehdellä. XOR havaitsee jokaisen yksittäisen bittivirheen, mutta ei kahta samaa bittiä kahdessa eri tavussa: se riittää USB-sarjayhteydelle, jossa virheet ovat harvinaisia, mutta ei korvaa CRC:tä häiriöisellä linjalla.
+Dashboard hylkää rivin, jonka tarkistussumma ei täsmää, ja laskee numeroiden aukoista kadonneet rivit. Molemmat näkyvät System-välilehdellä ("Serial link"). XOR havaitsee jokaisen yksittäisen bittivirheen, mutta ei kahta samaa bittiä kahdessa eri tavussa: se riittää USB-sarjayhteydelle, jossa virheet ovat harvinaisia, mutta ei korvaa CRC:tä häiriöisellä linjalla.
 
 Dashboard ymmärtää myös vanhat muodot `pir,valo` ja `pir,valo,kirkkaus,jannite_mV,virta_mA,teho_mW`.
 
@@ -142,4 +142,4 @@ Dashboard ymmärtää myös vanhat muodot `pir,valo` ja `pir,valo,kirkkaus,janni
 - `T,<0-1023>`: tavoite valoanturin yksiköissä
 - `H,<1-3600>`: pitoaika sekunteina
 - `K,<1-50>`: säätimen kerroin (promillea kirkkautta per ADC-yksikkö per 100 ms:n askel)
-- `D,<0|1>`: ajoituksen validointirivi pois/päälle. Päällä ollessa Arduino lähettää kerran sekunnissa rivin `#diag,tikit,ohitetut,suurin_viive_us,kuorma_promillea`, jonka dashboard näyttää Järjestelmä-välilehdellä (ks. [VALIDOINTI.md](VALIDOINTI.md)). Dashboard ymmärtää myös kaksi lisäkenttää `pir_liikkeet,pir_viive_max_us`, kun firmware mittaa PIR:n viiveen.
+- `D,<0|1>`: ajoituksen validointirivi pois/päälle. Päällä ollessa Arduino lähettää kerran sekunnissa rivin `#diag,tikit,ohitetut,suurin_viive_us,kuorma_promillea`, jonka dashboard näyttää System-välilehdellä (ks. [VALIDOINTI.md](VALIDOINTI.md)). Dashboard ymmärtää myös kaksi lisäkenttää `pir_liikkeet,pir_viive_max_us`, kun firmware mittaa PIR:n viiveen.
