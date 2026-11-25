@@ -5,7 +5,7 @@ Lukee Arduinolta USB-sarjaportin kautta rivejä muodossa
     pir,valo,kirkkaus,tavoite,tila,jannite_mV,virta_mA,teho_mW,numero*HH   (firmware/luxlamppu)
 missä numero kasvaa joka rivillä ja HH on tarkistussumma (kaikkien '*'-merkkiä edeltävien
 tavujen XOR). Rivi, jonka summa ei täsmää, hylätään, ja numeroiden aukoista lasketaan
-kadonneet rivit. Tulokset näkyvät Järjestelmä-välilehdellä. Ymmärtää myös muodot
+kadonneet rivit. Tulokset näkyvät System-välilehdellä. Ymmärtää myös muodot
     pir,valo,kirkkaus,tavoite,tila,jannite_mV,virta_mA,teho_mW
 tai vanhemmissa muodoissa
     pir,valo,kirkkaus,jannite_mV,virta_mA,teho_mW
@@ -26,7 +26,7 @@ kirkkautta niin, että anturin lukema pysyy tavoitteessa. Dashboard lähettää
 tavoitteen (T), pitoajan (H) ja tarvittaessa säätimen kertoimen (K) aina, kun
 yhteys avataan, ja uudelleen, jos Arduinon ilmoittama tavoite ei vastaa liukusäädintä.
 
-Ikkunassa on kaksi välilehteä. "Lamppu" näyttää yllä kuvatut kaaviot. "Järjestelmä"
+Käyttöliittymä on englanniksi. Ikkunassa on kaksi välilehteä: "Lamp" näyttää yllä kuvatut kaaviot. "System"
 näyttää firmwaren omat ajoitusmittarit: dashboard kytkee ne päälle komennolla D,1, ja
 Arduino lähettää kerran sekunnissa rivin
     #diag,tikit,ohitetut,suurin_viive_us,kuorma_promillea[,pir_liikkeet,pir_viive_max_us]
@@ -97,7 +97,7 @@ DIAG_STALE_S = 5         # näin kauan ilman #diag-riviä: firmware ei lähetä 
 TICK_MS = 10             # firmwaren Timer1-tikki
 LOAD_COLOR = "#38bdf8"
 LATENCY_COLOR = "#fbbf24"
-STATE_NAMES = {0: "pois (ei liikettä)", 1: "säätö", 2: "sammumisanimaatio", 3: "heräämisanimaatio"}
+STATE_NAMES = {0: "off (no motion)", 1: "control", 2: "fade-out animation", 3: "fade-in animation"}
 
 # Tumma teema
 BG = "#111418"
@@ -134,7 +134,7 @@ class State:
         self.last_seen = None        # time.time() viimeisestä liikkeestä
         self.last_data = None        # time.time() viimeisestä kelvollisesta rivistä
         self.connected_at = None
-        self.status = "Odotetaan dataa..."
+        self.status = "Waiting for data..."
         self.firmware = None         # firmwaren käännösaika (V-rivi) tai None
         self.error = None            # näkyvä virheilmoitus tai None
         self.energy_mwh = 0.0
@@ -387,16 +387,16 @@ def explain_open_error(port, message):
     """Muuttaa pyserialin virheilmoituksen ohjeeksi käyttäjälle."""
     text = message.lower()
     if "access is denied" in text or "busy" in text or "errno 16" in text:
-        return (f"Sarjaporttia {port} ei saada auki: se on käytössä toisessa ohjelmassa.\n"
-                "Sulje Arduino IDE:n Serial Monitor (tai muu sarjaterminaali).\n"
-                "Dashboard yhdistää automaattisesti, kun portti vapautuu.")
+        return (f"Cannot open serial port {port}: it is in use by another program.\n"
+                "Close the Arduino IDE Serial Monitor (or another serial terminal).\n"
+                "The dashboard reconnects automatically when the port is free.")
     if "permission denied" in text:
-        return (f"Ei oikeutta avata sarjaporttia {port}.\n"
-                "Linux: lisää käyttäjä dialout-ryhmään ja kirjaudu uudelleen sisään.")
+        return (f"No permission to open serial port {port}.\n"
+                "Linux: add the user to the dialout group and log in again.")
     if "cannot find" in text or "no such file" in text or "filenotfound" in text:
-        return (f"Sarjaporttia {port} ei löydy.\n"
-                "Onko Arduino kytketty USB:llä? Tarkista portin nimi (--port).")
-    return f"Sarjaporttia {port} ei saada auki:\n{message}"
+        return (f"Serial port {port} not found.\n"
+                "Is the Arduino connected over USB? Check the port name (--port).")
+    return f"Cannot open serial port {port}:\n{message}"
 
 
 def find_port():
@@ -412,8 +412,8 @@ def find_port():
             return p.device
     if len(ports) == 1:
         return ports[0].device
-    names = ", ".join(p.device for p in ports) or "ei yhtään"
-    sys.exit(f"Arduinoa ei löytynyt automaattisesti. Portit: {names}. Anna portti: --port COM3")
+    names = ", ".join(p.device for p in ports) or "none"
+    sys.exit(f"Arduino not found automatically. Ports: {names}. Give the port: --port COM3")
 
 
 def log_sample(log, t, s):
@@ -455,7 +455,7 @@ def serial_reader(port, baud, state, log):
         try:
             ser = serial.Serial(port, baud, timeout=1)
         except (serial.SerialException, OSError) as e:
-            state.set_connection(f"Ei yhteyttä: {port}", explain_open_error(port, str(e)))
+            state.set_connection(f"Not connected: {port}", explain_open_error(port, str(e)))
             time.sleep(RETRY_S)
             continue
 
@@ -465,16 +465,16 @@ def serial_reader(port, baud, state, log):
             with write_lock:
                 ser.write((line + "\n").encode("ascii"))
 
-        state.set_connection(f"Yhdistetty: {port}", connected=True, write=write)
+        state.set_connection(f"Connected: {port}", connected=True, write=write)
         try:
             with ser:
                 while True:
                     raw = ser.readline().decode("ascii", errors="ignore")
                     process_line(state, raw, log)
         except (serial.SerialException, OSError) as e:
-            state.set_connection(f"Ei yhteyttä: {port}",
-                                 f"Yhteys sarjaporttiin {port} katkesi.\n"
-                                 f"Onko USB-kaapeli irronnut? ({e})")
+            state.set_connection(f"Not connected: {port}",
+                                 f"Connection to serial port {port} was lost.\n"
+                                 f"Has the USB cable come loose? ({e})")
             time.sleep(RETRY_S)
 
 
@@ -499,7 +499,7 @@ def start_control_server(state):
                         conn.sendall(b"ok\n")
                         state.stop_requested.set()
                     elif command:
-                        conn.sendall(b"tuntematon komento\n")
+                        conn.sendall(b"unknown command\n")
                 except OSError:
                     pass      # esim. "stop"-komennon tarkistusyhteys, joka sulkeutuu heti
 
@@ -514,10 +514,10 @@ def send_stop():
             conn.sendall(b"stop\n")
             reply = conn.recv(64).decode("ascii", errors="ignore").strip()
     except OSError:
-        print("Dashboard ei ole käynnissä.")
+        print("Dashboard is not running.")
         return 1
     if reply != "ok":
-        print(f"Odottamaton vastaus: {reply!r}")
+        print(f"Unexpected reply: {reply!r}")
         return 1
     # Kun prosessi on sulkeutunut, portti ei enää ota yhteyksiä vastaan ja sarjaportti on vapaa
     deadline = time.time() + STOP_WAIT_S
@@ -525,10 +525,10 @@ def send_stop():
         try:
             socket.create_connection(("127.0.0.1", CONTROL_PORT), timeout=0.5).close()
         except OSError:
-            print("Dashboard suljettu.")
+            print("Dashboard closed.")
             return 0
         time.sleep(0.2)
-    print(f"Dashboard otti käskyn vastaan, mutta ei sulkeutunut {STOP_WAIT_S} sekunnissa.")
+    print(f"Dashboard accepted the command but did not close within {STOP_WAIT_S} s.")
     return 1
 
 
@@ -603,7 +603,7 @@ def anim_fraction(phase, n=39, edge=0.4):
 
 
 def demo_reader(state, log, sim):
-    state.set_connection("Demotila: testidata", connected=True, write=sim.command)
+    state.set_connection("Demo mode: simulated data", connected=True, write=sim.command)
     with state.lock:
         state.firmware = "demo"
     start, next_diag, pir_n, pir_max, last_pir = time.time(), time.time() + 1, 0, 0, 0
@@ -652,7 +652,7 @@ def load_history(state, paths, now):
                     if sample["pir"] is not None and sample["light"] is not None:
                         rows.append((t, sample))
         except (OSError, UnicodeDecodeError, csv.Error) as e:
-            print(f"Historiaa ei voitu lukea tiedostosta {path}: {e}")
+            print(f"Could not read history from {path}: {e}")
     rows.sort(key=lambda r: r[0])
     for t, sample in rows:
         state.add(t, sample, history=True)
@@ -674,7 +674,7 @@ def with_gaps(xs, ys, max_gap):
 
 
 def fmt_num(value, decimals):
-    return f"{value:.{decimals}f}".replace(".", ",")
+    return f"{value:.{decimals}f}"
 
 
 def fmt_energy(mwh):
@@ -687,7 +687,7 @@ def set_time_axis(axes, span, now):
     if span <= 120:
         ticks = list(range(-span, 1, step))
         labels = [str(t) for t in ticks]
-        xlabel = "aika (s, 0 = nyt)"
+        xlabel = "time (s, 0 = now)"
     else:
         offset = datetime.fromtimestamp(now).astimezone().utcoffset().total_seconds()
         first = math.ceil((now - span + offset) / step) * step - offset
@@ -697,7 +697,7 @@ def set_time_axis(axes, span, now):
             ticks.append(t - now)
             labels.append(datetime.fromtimestamp(t).strftime("%H:%M"))
             t += step
-        xlabel = "kellonaika"
+        xlabel = "time of day"
     for a in axes:
         a.set_xlim(-span, 0)
         a.set_xticks(ticks)
@@ -707,14 +707,14 @@ def set_time_axis(axes, span, now):
 
 def format_last_seen(last_seen, now):
     if last_seen is None:
-        return "Ihmistä ei ole vielä havaittu"
+        return "No person detected yet"
     ago = int(now - last_seen)
     clock = datetime.fromtimestamp(last_seen).strftime("%H:%M:%S")
     if ago < 1:
-        return f"Ihminen havaittu nyt ({clock})"
+        return f"Person detected now ({clock})"
     if ago < 60:
-        return f"Ihminen viimeksi havaittu {clock} ({ago} s sitten)"
-    return f"Ihminen viimeksi havaittu {clock} ({ago // 60} min {ago % 60} s sitten)"
+        return f"Person last detected {clock} ({ago} s ago)"
+    return f"Person last detected {clock} ({ago // 60} min {ago % 60} s ago)"
 
 
 def style_axis(ax):
@@ -743,29 +743,29 @@ def build_figure(state):
 
     # Valoanturi ja tavoite (vasen akseli), LED-kirkkaus (oikea akseli)
     style_axis(ax)
-    (art["line"],) = ax.plot([], [], color=LIGHT_COLOR, linewidth=1.8, label="valoanturi")
+    (art["line"],) = ax.plot([], [], color=LIGHT_COLOR, linewidth=1.8, label="light sensor")
     art["target"] = ax.axhline(state.desired, color=TARGET_COLOR, linewidth=1.5, linestyle="--",
-                               label="tavoite")
+                               label="target")
     ax.set_ylim(0, 300)
-    ax.set_ylabel("valoanturin arvo (ADC)", color=MUTED)
+    ax.set_ylabel("light sensor reading (ADC)", color=MUTED)
     ax_b = ax.twinx()
     ax_b.set_ylim(0, 105)
-    ax_b.set_ylabel("LED-kirkkaus (%)", color=MUTED)
+    ax_b.set_ylabel("LED brightness (%)", color=MUTED)
     ax_b.tick_params(colors=MUTED)
     (art["bright_line"],) = ax_b.plot([], [], color=BRIGHT_COLOR, linewidth=1.4, alpha=0.9,
-                                      drawstyle="steps-post", label="LED-kirkkaus")
+                                      drawstyle="steps-post", label="LED brightness")
     ax.legend(handles=[art["line"], art["target"], art["bright_line"],
-                       Patch(color=MOTION_COLOR, alpha=0.3, label="liike havaittu")],
+                       Patch(color=MOTION_COLOR, alpha=0.3, label="motion detected")],
               loc="upper left", facecolor=PANEL, edgecolor=GRID, labelcolor=TEXT)
 
     # INA219: teho
     style_axis(ax_p)
     (art["power_line"],) = ax_p.plot([], [], color=POWER_COLOR, linewidth=1.6,
-                                     label="keskiteho 10 s:n jaksossa")
+                                     label="mean power per 10 s")
     ax_p.set_ylim(0, 1)
-    ax_p.set_ylabel("nauhan teho (W)", color=MUTED)
+    ax_p.set_ylabel("strip power (W)", color=MUTED)
     art["power_legend"] = ax_p.legend(
-        handles=[art["power_line"], Patch(color=POWER_COLOR, alpha=0.25, label="pienin–suurin")],
+        handles=[art["power_line"], Patch(color=POWER_COLOR, alpha=0.25, label="min–max")],
         loc="upper right", facecolor=PANEL, edgecolor=GRID, labelcolor=TEXT, fontsize=8.5)
     art["power_stats"] = ax_p.text(0.01, 0.95, "", transform=ax_p.transAxes, va="top",
                                    fontsize=9.5, color=TEXT,
@@ -774,7 +774,7 @@ def build_figure(state):
     set_time_axis((ax, ax_p), state.range_s, time.time())
 
     # Aikavälin valinta
-    fig.text(0.09, 0.124, "Aikaväli", fontsize=10, color=TEXT, va="center")
+    fig.text(0.09, 0.124, "Time range", fontsize=10, color=TEXT, va="center")
     art["range_buttons"] = []
     for i, (label, span) in enumerate(RANGES):
         b = Button(fig.add_axes([0.17 + i * 0.1, 0.104, 0.09, 0.04]), label,
@@ -785,16 +785,16 @@ def build_figure(state):
 
     # Tavoitteen liukusäädin ja "käytä nykyistä lukemaa" -painike
     ax_slider = fig.add_axes([0.17, 0.055, 0.5, 0.035], facecolor=PANEL)
-    art["slider"] = Slider(ax_slider, "Tavoite", 0, TARGET_MAX, valinit=state.desired, valstep=1,
+    art["slider"] = Slider(ax_slider, "Target", 0, TARGET_MAX, valinit=state.desired, valstep=1,
                            color=TARGET_COLOR, track_color=GRID, initcolor="none")
     art["slider"].label.set_color(TEXT)
     art["slider"].valtext.set_color(TEXT)
     ax_button = fig.add_axes([0.73, 0.045, 0.18, 0.055])
-    art["button"] = Button(ax_button, "Käytä nykyistä lukemaa", color=PANEL, hovercolor=GRID)
+    art["button"] = Button(ax_button, "Use current reading", color=PANEL, hovercolor=GRID)
     art["button"].label.set_color(TEXT)
     art["button"].label.set_fontsize(9)
-    fig.text(0.17, 0.012, "Liukusäädin asettaa tavoitteen valoanturin yksiköissä. Arduino säätää "
-             "LED-nauhan kirkkautta, kunnes anturin lukema on tavoitteessa.", fontsize=8.5, color=MUTED)
+    fig.text(0.17, 0.012, "The slider sets the target in light sensor units. The Arduino adjusts the "
+             "LED strip brightness until the sensor reading matches the target.", fontsize=8.5, color=MUTED)
 
     # Virheilmoitus näkyy kaavioiden päällä vain, kun jokin on vialla
     art["error"] = fig.text(0.5, 0.5, "", ha="center", va="center", fontsize=13, fontweight="bold",
@@ -896,10 +896,10 @@ def make_updater(state, ax, ax_b, ax_p, art):
         energy, dur = sum(v["energy"]), sum(v["dur"])
         if dur > 0:
             art["power_stats"].set_text(
-                f"Näkyvä jakso: keskiteho {fmt_num(energy * 3.6 / dur, 2)} W    "
-                f"suurin {fmt_num(max(peaks) / 1000, 2)} W    energia {fmt_energy(energy)}")
+                f"Visible range: mean power {fmt_num(energy * 3.6 / dur, 2)} W    "
+                f"max {fmt_num(max(peaks) / 1000, 2)} W    energy {fmt_energy(energy)}")
         else:
-            art["power_stats"].set_text("Näkyvällä jaksolla ei tehomittauksia")
+            art["power_stats"].set_text("No power measurements in the visible range")
 
         # Liike
         x, pir = with_gaps(rel, v["pir"], gap)
@@ -911,29 +911,29 @@ def make_updater(state, ax, ax_b, ax_p, art):
         art["seen"].set_text(format_last_seen(s["last_seen"], now))
         if latest:
             if latest["state"] is not None:
-                art["mode"].set_text(f"Lampun tila: {STATE_NAMES[latest['state']]}    "
-                                     f"Pitoaika: {state.hold_s} s")
+                art["mode"].set_text(f"Lamp state: {STATE_NAMES[latest['state']]}    "
+                                     f"Hold time: {state.hold_s} s")
             else:
-                art["mode"].set_text("Lampun tila: ei tietoa (vanha firmware)")
-            motion = "kyllä" if latest["pir"] else "ei"
+                art["mode"].set_text("Lamp state: unknown (old firmware)")
+            motion = "yes" if latest["pir"] else "no"
             bright = f"{latest['bright']} %" if latest["bright"] is not None else "–"
-            art["light"].set_text(f"Valoisuus: {latest['light']} / tavoite {target}    "
-                                  f"LED-kirkkaus: {bright}    Liikettä: {motion}")
+            art["light"].set_text(f"Light: {latest['light']} / target {target}    "
+                                  f"LED brightness: {bright}    Motion: {motion}")
             if latest["mw"] is None:
-                art["power_text"].set_text("INA219: ei tietoa (firmware lähettää vain anturit)")
+                art["power_text"].set_text("INA219: no data (firmware sends sensors only)")
             elif latest["mw"] < 0:
-                art["power_text"].set_text("INA219 ei vastaa: tarkista VCC, GND, SDA (A4) ja SCL (A5)")
+                art["power_text"].set_text("INA219 not responding: check VCC, GND, SDA (A4) and SCL (A5)")
             else:
                 art["power_text"].set_text(
-                    f"Jännite: {fmt_num(latest['mv'] / 1000, 2)} V    Virta: {latest['ma']} mA    "
-                    f"Teho: {fmt_num(latest['mw'] / 1000, 2)} W    "
-                    f"Energia käynnistyksestä: {fmt_energy(s['energy_mwh'])}")
+                    f"Voltage: {fmt_num(latest['mv'] / 1000, 2)} V    Current: {latest['ma']} mA    "
+                    f"Power: {fmt_num(latest['mw'] / 1000, 2)} W    "
+                    f"Energy since start: {fmt_energy(s['energy_mwh'])}")
         else:
             art["mode"].set_text("")
-            art["light"].set_text("Valoisuus: –")
+            art["light"].set_text("Light: –")
             art["power_text"].set_text("")
         firmware = state.firmware
-        art["status"].set_text(s["status"] + (f"    Firmware käännetty: {firmware}" if firmware else ""))
+        art["status"].set_text(s["status"] + (f"    Firmware built: {firmware}" if firmware else ""))
 
         # Portti on auki, mutta dataa ei tule: väärä ohjelma, väärä nopeus tai kortti jumissa
         error = s["error"]
@@ -941,8 +941,8 @@ def make_updater(state, ax, ax_b, ax_p, art):
             last = s["last_data"]
             since = now - (last if last and last > s["connected_at"] else s["connected_at"])
             if since > NO_DATA_S:
-                error = (f"Ei dataa Arduinolta {int(since)} sekuntiin.\n"
-                         "Onko kortille ladattu oikea ohjelma ja nopeus 9600 baudia?")
+                error = (f"No data from the Arduino for {int(since)} s.\n"
+                         "Is the right program on the board, at 9600 baud?")
 
         art["error"].set_visible(error is not None)
         if error is not None:
@@ -959,7 +959,7 @@ def build_system_figure():
     fig.subplots_adjust(left=0.09, right=0.91, top=0.97, bottom=0.07, hspace=0.4)
     ax_info.axis("off")
     art = {}
-    art["title"] = ax_info.text(0.0, 0.95, "Firmwaren ajoitus ja kuorma", fontsize=14,
+    art["title"] = ax_info.text(0.0, 0.95, "Firmware timing and load", fontsize=14,
                                 fontweight="bold", color=TEXT, transform=ax_info.transAxes)
     for i, key in enumerate(["line1", "line2", "line3", "line4", "line5"]):
         art[key] = ax_info.text(0.0, 0.72 - i * 0.19, "", fontsize=11.5, color=TEXT,
@@ -970,19 +970,19 @@ def build_system_figure():
     (art["load"],) = ax_load.plot([], [], color=LOAD_COLOR, linewidth=1.6)
     ax_load.set_xlim(-DIAG_WINDOW_S / 60, 0)
     ax_load.set_ylim(0, 100)
-    ax_load.set_ylabel("suoritinkuorma (%)", color=MUTED)
-    ax_load.set_title("Kuinka suuren osan ajasta pääsilmukka tekee työtä (loput on odotusta)",
+    ax_load.set_ylabel("CPU load (%)", color=MUTED)
+    ax_load.set_title("Share of time the main loop is working (the rest is idle waiting)",
                       fontsize=10, color=MUTED, loc="left")
 
     style_axis(ax_lat)
     (art["latency"],) = ax_lat.plot([], [], color=LATENCY_COLOR, linewidth=1.6,
-                                    drawstyle="steps-post", label="suurin viive tikistä työhön")
+                                    drawstyle="steps-post", label="max latency from tick to work")
     art["limit"] = ax_lat.axhline(TICK_MS, color=ERROR_EDGE, linewidth=1.2, linestyle="--",
-                                  label=f"raja: yksi tikki ({TICK_MS} ms)")
+                                  label=f"limit: one tick ({TICK_MS} ms)")
     ax_lat.set_xlim(-DIAG_WINDOW_S / 60, 0)
     ax_lat.set_ylim(0, TICK_MS * 1.3)
-    ax_lat.set_ylabel("viive (ms)", color=MUTED)
-    ax_lat.set_xlabel("aika (min, 0 = nyt)", color=MUTED)
+    ax_lat.set_ylabel("latency (ms)", color=MUTED)
+    ax_lat.set_xlabel("time (min, 0 = now)", color=MUTED)
     ax_lat.legend(loc="upper left", facecolor=PANEL, edgecolor=GRID, labelcolor=TEXT, fontsize=9)
     return fig, ax_load, ax_lat, art
 
@@ -1000,73 +1000,73 @@ def make_system_updater(state, ax_load, ax_lat, art):
 
         latest = s["latest"]
         if latest is None or latest["mw"] is None:
-            ina = "ei tietoa"
+            ina = "no data"
         elif latest["mw"] < 0:
-            ina = "ei vastaa"
+            ina = "not responding"
         else:
-            ina = "toimii"
-        art["line1"].set_text(f"Firmware käännetty: {s['firmware'] or '–'}    "
-                              f"Telemetria: {fmt_num(s['rate'], 1)} riviä/s (tavoite 5)    "
+            ina = "OK"
+        art["line1"].set_text(f"Firmware built: {s['firmware'] or '–'}    "
+                              f"Telemetry: {fmt_num(s['rate'], 1)} lines/s (target 5)    "
                               f"INA219: {ina}")
         fresh = diag and now - diag[-1][0] <= DIAG_STALE_S
         if not diag or not fresh:
             waited = s["connected_at"] is not None and now - s["connected_at"] > DIAG_STALE_S
             for key in ("line2", "line3", "line4"):
                 art[key].set_text("")
-            art["line2"].set_text("Ajoitusmittareita (#diag) ei tule." if waited else
-                                  "Odotetaan ajoitusmittareita...")
-            art["line3"].set_text("Firmware on vanhempi kuin Timer1-versio tai ei tue D-komentoa."
+            art["line2"].set_text("No timing metrics (#diag) received." if waited else
+                                  "Waiting for timing metrics...")
+            art["line3"].set_text("The firmware is older than the Timer1 version or does not support the D command."
                                   if waited else "")
         else:
             last = diag[-1]
             missed = last[2] - diag[0][2]
             loads = [d[4] / 10 for d in diag]
-            art["line2"].set_text(f"Timer1-tikki {TICK_MS} ms:    ohitetut tikit {missed} kpl, "
-                                  f"suurin viive tikistä työhön {fmt_num(max(lat_ms), 2)} ms "
-                                  f"(viimeiset {max(1, round((last[0] - diag[0][0]) / 60))} min)")
-            art["line3"].set_text(f"Suoritinkuorma: nyt {fmt_num(loads[-1], 1)} %, keskiarvo "
-                                  f"{fmt_num(sum(loads) / len(loads), 1)} %, suurin "
-                                  f"{fmt_num(max(loads), 1)} %  ->  vapaata "
+            art["line2"].set_text(f"Timer1 tick {TICK_MS} ms:    missed ticks {missed}, "
+                                  f"max latency from tick to work {fmt_num(max(lat_ms), 2)} ms "
+                                  f"(last {max(1, round((last[0] - diag[0][0]) / 60))} min)")
+            art["line3"].set_text(f"CPU load: now {fmt_num(loads[-1], 1)} %, mean "
+                                  f"{fmt_num(sum(loads) / len(loads), 1)} %, max "
+                                  f"{fmt_num(max(loads), 1)} %  ->  idle "
                                   f"{fmt_num(100 - sum(loads) / len(loads), 1)} %, "
-                                  "jonka unitila voi korvata")
+                                  "that a sleep mode could replace")
             if last[5] is None:
-                art["line4"].set_text("PIR-viive: firmware ei vielä mittaa sitä")
+                art["line4"].set_text("PIR latency: not measured by this firmware yet")
             else:
-                art["line4"].set_text(f"PIR-viive liikkeestä käsittelyyn: suurin "
-                                      f"{fmt_num(last[6] / 1000, 2)} ms, liikkeitä {last[5]} "
-                                      "(käynnistyksestä)")
+                art["line4"].set_text(f"PIR latency from motion to handling: max "
+                                      f"{fmt_num(last[6] / 1000, 2)} ms, motion events {last[5]} "
+                                      "(since start)")
         link = s["link"]
         if link["ok"]:
             total = link["ok"] + link["lost"]
-            art["line5"].set_text(f"Viestiyhteys: {link['ok']} riviä tarkistettu, hylätty "
-                                  f"{link['bad']} (rikkoutunut rivi), kadonnut {link['lost']} "
-                                  f"({fmt_num(100 * link['lost'] / total, 2)} %) tämän yhteyden aikana")
+            art["line5"].set_text(f"Serial link: {link['ok']} lines verified, rejected "
+                                  f"{link['bad']} (corrupted), lost {link['lost']} "
+                                  f"({fmt_num(100 * link['lost'] / total, 2)} %) on this connection")
         elif link["plain"]:
-            art["line5"].set_text("Viestiyhteys: firmware ei lähetä tarkistussummaa (vanha versio)")
+            art["line5"].set_text("Serial link: the firmware sends no checksum (old version)")
         else:
-            art["line5"].set_text("Viestiyhteys: odotetaan rivejä...")
-        art["note"].set_text("Mittarit laskee firmware itse Timer1:n 4 µs:n tarkkuudella ja lähettää "
-                             "kerran sekunnissa. Virallinen todiste: validointi/validoi_ajoitus.py.")
+            art["line5"].set_text("Serial link: waiting for lines...")
+        art["note"].set_text("The firmware computes these metrics itself with Timer1's 4 µs resolution and "
+                             "sends them once per second. Formal evidence: validointi/validoi_ajoitus.py.")
 
     return update
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Luxlampun PC-dashboard")
+    parser = argparse.ArgumentParser(description="Smart Lux Lamp PC dashboard")
     parser.add_argument("komento", nargs="?", choices=["stop"],
-                        help="stop: sulje käynnissä oleva dashboard")
-    parser.add_argument("--port", help="sarjaportti, esim. COM3 tai /dev/ttyACM0")
+                        help="stop: close the running dashboard")
+    parser.add_argument("--port", help="serial port, e.g. COM3 or /dev/ttyACM0")
     parser.add_argument("--baud", type=int, default=9600)
-    parser.add_argument("--demo", action="store_true", help="testidata ilman Arduinoa")
-    parser.add_argument("--pitoaika", type=int, default=180,
-                        help="sekunnit ilman liikettä ennen sammumista (1–3600, oletus 180)")
-    parser.add_argument("--paivitys", type=float, default=UPDATE_S,
-                        help=f"näkymän päivitysväli sekunteina (0,2–60, oletus {UPDATE_S:g})")
-    parser.add_argument("--ki", type=int, help="säätimen kerroin 1–50 (oletus: Arduinon oma, 3)")
-    parser.add_argument("--log", help="CSV-tiedosto, johon data tallennetaan "
-                        "(oletus mittaukset/mittaus_<aika>.csv, demossa mittaukset/demo_<aika>.csv)")
-    parser.add_argument("--ei-historiaa", action="store_true",
-                        help="älä lataa aiempia mittauksia mittaukset/mittaus_*.csv-tiedostoista")
+    parser.add_argument("--demo", action="store_true", help="simulated data without an Arduino")
+    parser.add_argument("--hold-time", "--pitoaika", dest="pitoaika", type=int, default=180,
+                        help="seconds without motion before the lamp turns off (1–3600, default 180)")
+    parser.add_argument("--refresh", "--paivitys", dest="paivitys", type=float, default=UPDATE_S,
+                        help=f"view refresh interval in seconds (0.2–60, default {UPDATE_S:g})")
+    parser.add_argument("--ki", type=int, help="controller gain 1–50 (default: the Arduino's own, 3)")
+    parser.add_argument("--log", help="CSV file for the received data "
+                        "(default mittaukset/mittaus_<time>.csv, in demo mode mittaukset/demo_<time>.csv)")
+    parser.add_argument("--no-history", "--ei-historiaa", dest="ei_historiaa", action="store_true",
+                        help="do not load earlier measurements from mittaukset/mittaus_*.csv")
     args = parser.parse_args()
     if args.komento == "stop":
         sys.exit(send_stop())
@@ -1075,16 +1075,16 @@ def main():
         name = f"{'demo' if args.demo else 'mittaus'}_{datetime.now():%Y%m%d_%H%M%S}.csv"
         args.log = os.path.join(LOG_DIR, name)
     if not 1 <= args.pitoaika <= 3600:
-        sys.exit("--pitoaika pitää olla 1–3600 sekuntia")
+        sys.exit("--hold-time must be 1–3600 seconds")
     if not 0.2 <= args.paivitys <= 60:
-        sys.exit("--paivitys pitää olla 0,2–60 sekuntia")
+        sys.exit("--refresh must be 0.2–60 seconds")
     if args.ki is not None and not 1 <= args.ki <= 50:
-        sys.exit("--ki pitää olla 1–50")
+        sys.exit("--ki must be 1–50")
 
     state = State()
     if not start_control_server(state):
-        print(f"Varoitus: portti {CONTROL_PORT} on varattu (toinen dashboard käynnissä?), "
-              "joten tätä dashboardia ei voi sulkea komennolla 'dashboard.py stop'.")
+        print(f"Warning: port {CONTROL_PORT} is in use (another dashboard running?), "
+              "so this dashboard cannot be closed with 'dashboard.py stop'.")
     state.hold_s = args.pitoaika
     state.ki = args.ki
     now = time.time()
@@ -1102,7 +1102,7 @@ def main():
                  if os.path.getmtime(p) >= now - LONG_S]
         if paths:
             count = load_history(state, paths, now)
-            print(f"Ladattiin {count} aiempaa näytettä {len(paths)} tiedostosta (viimeiset 12 h).")
+            print(f"Loaded {count} earlier samples from {len(paths)} files (last 12 h).")
     logfile = open(args.log, "w", newline="", buffering=1)
     log = csv.writer(logfile)
     log.writerow(["aika", "pir", "valo", "kirkkaus_pct", "tavoite", "tila",
@@ -1120,13 +1120,13 @@ def main():
 
 
 def run_window(state, interval_s):
-    """Ikkuna, jossa on välilehdet Lamppu ja Järjestelmä. Vain näkyvä välilehti piirretään."""
+    """Ikkuna, jossa on välilehdet Lamp ja System. Vain näkyvä välilehti piirretään."""
     import tkinter as tk
     from tkinter import ttk
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
     root = tk.Tk()
-    root.title("Luxlamppu - dashboard")
+    root.title("Smart Lux Lamp - dashboard")
     root.configure(bg=BG)
     style = ttk.Style(root)
     style.theme_use("clam")
@@ -1140,8 +1140,8 @@ def run_window(state, interval_s):
     fig, ax, ax_b, ax_p, art = build_figure(state)
     sys_fig, ax_load, ax_lat, sys_art = build_system_figure()
     for name, figure, updater in (
-            ("Lamppu", fig, make_updater(state, ax, ax_b, ax_p, art)),
-            ("Järjestelmä", sys_fig, make_system_updater(state, ax_load, ax_lat, sys_art))):
+            ("Lamp", fig, make_updater(state, ax, ax_b, ax_p, art)),
+            ("System", sys_fig, make_system_updater(state, ax_load, ax_lat, sys_art))):
         frame = tk.Frame(notebook, bg=BG)
         notebook.add(frame, text=name)
         canvas = FigureCanvasTkAgg(figure, master=frame)
