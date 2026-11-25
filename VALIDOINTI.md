@@ -80,8 +80,8 @@ Simulaattori ei tunne PC:n kelloa, joten tikin taajuutta ei tarkisteta. Sen sija
 
 | # | Askel | Hyväksytty, kun |
 | --- | --- | --- |
-| 1 | Lataa PR:n firmware ja käynnistä dashboard. Liiku PIR:n edessä ja pysy sitten paikallasi. | Dashboardin "Liikettä"-kenttä ja liikealue kaaviossa seuraavat PIR:iä kuten ennenkin. |
-| 2 | Aseta pitoajaksi 20 s (`python dashboard/dashboard.py --pitoaika 20`). Poistu, odota että nauha sammuu, ja palaa. | Herääminen alkaa, kun PIR havaitsee liikkeen. Sama myös kesken sammumisanimaation: valo kääntyy kirkastumaan ilman välähdystä. |
+| 1 | Lataa PR:n firmware ja käynnistä dashboard. Liiku PIR:n edessä ja pysy sitten paikallasi. | Dashboardin "Motion"-kenttä ja liikealue kaaviossa seuraavat PIR:iä kuten ennenkin. |
+| 2 | Aseta pitoajaksi 20 s (`python dashboard/dashboard.py --hold-time 20`). Poistu, odota että nauha sammuu, ja palaa. | Herääminen alkaa, kun PIR havaitsee liikkeen. Sama myös kesken sammumisanimaation: valo kääntyy kirkastumaan ilman välähdystä. |
 | 3 | Kytke skooppi: kanava 1 PIR:n SIG (D2), kanava 2 D7, maa GND:hen. Laukaisu kanavan 1 nousevaan reunaan. Toista liike 20 kertaa ja kirjaa suurin viive (pysyvä näyttö tai kursorit). | D7 nousee jokaisella kerralla, ja viive on enintään yksi tikki (10 ms) plus konseptin 1 suurin viive tikistä työhön, eli käytännössä enintään noin 12 ms. |
 | 4 | Aja ajoituksen validointi kuten konseptissa 1 (`validoi_ajoitus.py --kesto 600 --pitoaika 20`). | Kriteerit täyttyvät edelleen: uusi keskeytys ei aiheuta ohitettuja tikkejä. |
 
@@ -95,4 +95,38 @@ Simulaattori ei tunne PC:n kelloa, joten tikin taajuutta ei tarkisteta. Sen sija
 Ennen-viive on laskettu, koska vanhassa firmwaressa ei ole merkkipinniä: pollaus luki PIR:n kerran 100 ms:ssa, joten viive on reunan ajankohdasta riippuen 0–100 ms.
 
 **Rehellinen arvio:** käyttäjä ei huomaa eroa, koska PIR itse reagoi liikkeeseen noin sekunnin viiveellä. Muutoksen hyöty on siinä, että liike käsitellään tapahtumana eikä kyselemällä, viive on mitattavissa, ja keskeytys on herätelähde, jota seuraava konsepti (unitilat) tarvitsee.
+
+---
+
+## Konsepti 3: viestiprotokolla, tarkistussumma ja rivin numero
+
+**Mitä muuttui:** jokaisen telemetriarivin loppuun tulee rivin numero (0–255) ja tarkistussumma (`*HH`, tavujen XOR). Dashboard hylkää rivit, joiden summa ei täsmää, ja laskee numeroiden aukoista kadonneet rivit. Ennen virheellinen rivi tunnistettiin vain kenttien määrästä ja arvoalueista, eikä kadonneita rivejä huomattu lainkaan.
+
+**Mittari:** dashboardin System-välilehden rivi "Serial link": tarkistetut, hylätyt ja kadonneet rivit tämän yhteyden aikana.
+
+### Ilman laitetta (jo tehty)
+
+| Testi | Tulos |
+| --- | --- |
+| `test_protocol.c`: jokainen yksittäinen bittivirhe esimerkkirivissä | 217/217 havaittu |
+| `test_protocol.c`: kaksi samaa bittiä kahdessa eri tavussa | ei havaita (XOR:n tunnettu rajoitus) |
+| `dashboard/test_protokolla.py`: ehjät, rikkoutuneet, kadonneet (myös 255 → 0 -kierto), uudelleenkäynnistys, vanha muoto | kaikki oikein |
+
+### 1) Toimii: laudalla tehtävät askeleet
+
+| # | Askel | Hyväksytty, kun |
+| --- | --- | --- |
+| 1 | Lataa firmware ja käynnistä dashboard. | Lamp-välilehti toimii kuten ennen. System-välilehdellä "Serial link" kasvaa noin 5 riviä sekunnissa. |
+| 2 | Anna dashboardin olla käynnissä vähintään 1 h tavallisessa käytössä (liiku välillä PIR:n edessä). Ota kuvakaappaus System-välilehdestä. | Hylättyjä 0 ja kadonneita 0, tai poikkeamat selitetään (esim. USB-kaapelin irrotus). |
+| 3 | Paina Unon reset-nappia dashboardin ollessa käynnissä. | Kadonneisiin tulee korkeintaan reset-hetken rivit (noin 2 s eli noin 10 riviä), ei satoja: numerointi alkaa alusta V-rivin kohdalla. |
+
+### 2) Hyöty: ennen/jälkeen
+
+| Mittari | Ennen | Jälkeen |
+| --- | --- | --- |
+| Rikkoutuneen rivin havaitseminen | vain kenttämäärä ja arvoalueet: yksittäinen muuttunut numero meni läpi | jokainen yksittäinen bittivirhe havaitaan |
+| Kadonneet rivit | ei havaita | lasketaan numeroiden aukoista ja näytetään |
+| Lopputyön ohjeen vaatimus (4.5 ja 7.4: virheentunnistus, kadonneet viestit) | ei täyttynyt | täyttyy, luvut raporttiin askeleesta 2 |
+
+**Rehellinen arvio:** USB-sarjayhteydellä virheitä tulee harvoin, joten odotettu tulos on 0 hylättyä. Arvo on siinä, että se on nyt mitattu eikä oletettu, ja että dashboard ei näytä rikkoutunutta mittausta oikeana.
 
