@@ -142,6 +142,7 @@ class State:
 
         self.desired = DEFAULT_TARGET  # liukusäätimen tavoite (valoanturin yksiköissä)
         self.hold_s = 180            # pitoaika sekunteina
+        self.warn_s = 15             # varoitusvärin kesto ennen sammumista (0 = ei varoitusta)
         self.ki = None               # säätimen kerroin; None = Arduinon oletus
         self.last_sent = None        # viimeksi lähetetty tavoite
         self.last_send_t = 0.0
@@ -705,6 +706,21 @@ def set_time_axis(axes, span, now):
     axes[-1].set_xlabel(xlabel, color=MUTED)
 
 
+def warning_text(lamp_state, last_seen, state, now):
+    """Lähtölaskenta sammumiseen, kun nauha näyttää varoitusväriä (sama sääntö kuin firmwaren
+    lamp_warning: pitoajan viimeiset warn_s sekuntia ja koko sammumisanimaatio)."""
+    if not state.warn_s:
+        return ""
+    if lamp_state == 2:
+        return "    Amber: turning off"
+    if lamp_state != 1 or last_seen is None:
+        return ""
+    left = state.hold_s - (now - last_seen)
+    if left <= min(state.warn_s, state.hold_s):
+        return f"    Amber: off in {max(0, math.ceil(left))} s"
+    return ""
+
+
 def format_last_seen(last_seen, now):
     if last_seen is None:
         return "No person detected yet"
@@ -842,6 +858,7 @@ def sync_settings(state, snap, now):
         if state.need_config:
             state.write("D,1")                # ajoitusmittarit Järjestelmä-välilehdelle
             state.write(f"H,{state.hold_s}")
+            state.write(f"W,{state.warn_s}")
             if state.ki is not None:
                 state.write(f"K,{state.ki}")
             state.need_config = False
@@ -912,7 +929,8 @@ def make_updater(state, ax, ax_b, ax_p, art):
         if latest:
             if latest["state"] is not None:
                 art["mode"].set_text(f"Lamp state: {STATE_NAMES[latest['state']]}    "
-                                     f"Hold time: {state.hold_s} s")
+                                     f"Hold time: {state.hold_s} s"
+                                     + warning_text(latest["state"], s["last_seen"], state, now))
             else:
                 art["mode"].set_text("Lamp state: unknown (old firmware)")
             motion = "yes" if latest["pir"] else "no"
@@ -1058,6 +1076,8 @@ def main():
     parser.add_argument("--port", help="serial port, e.g. COM3 or /dev/ttyACM0")
     parser.add_argument("--baud", type=int, default=9600)
     parser.add_argument("--demo", action="store_true", help="simulated data without an Arduino")
+    parser.add_argument("--warning", "--varoitus", dest="varoitus", type=int, default=15,
+                        help="seconds of amber warning colour before the lamp turns off (0–600, 0 = none, default 15)")
     parser.add_argument("--hold-time", "--pitoaika", dest="pitoaika", type=int, default=180,
                         help="seconds without motion before the lamp turns off (1–3600, default 180)")
     parser.add_argument("--refresh", "--paivitys", dest="paivitys", type=float, default=UPDATE_S,
@@ -1076,6 +1096,8 @@ def main():
         args.log = os.path.join(LOG_DIR, name)
     if not 1 <= args.pitoaika <= 3600:
         sys.exit("--hold-time must be 1–3600 seconds")
+    if not 0 <= args.varoitus <= 600:
+        sys.exit("--warning must be 0–600 seconds")
     if not 0.2 <= args.paivitys <= 60:
         sys.exit("--refresh must be 0.2–60 seconds")
     if args.ki is not None and not 1 <= args.ki <= 50:
@@ -1086,6 +1108,7 @@ def main():
         print(f"Warning: port {CONTROL_PORT} is in use (another dashboard running?), "
               "so this dashboard cannot be closed with 'dashboard.py stop'.")
     state.hold_s = args.pitoaika
+    state.warn_s = args.varoitus
     state.ki = args.ki
     now = time.time()
     sim = None

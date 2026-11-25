@@ -208,6 +208,27 @@ static void test_motion_event(void) {
     CHECK(l.state == LAMP_WELCOME, "sammuva lamppu ei alkanut herätä");
 }
 
+/* Varoitusväri: pitoajan viimeiset warn_ms ja sammumisanimaatio, liike palauttaa valkoisen. */
+static void test_warning(void) {
+    Lamp l; lamp_init(&l, 0);
+    l.hold_ms = 60000;                              // testikäytön 60 s, varoitus oletus 15 s
+    CHECK(!lamp_warning(&l, 44000), "varoitus liian aikaisin");
+    CHECK(lamp_warning(&l, 45100), "varoitus ei alkanut 15 s ennen sammumista");
+    lamp_motion(&l, 50000);
+    CHECK(!lamp_warning(&l, 50000), "liike ei poistanut varoitusta");
+    lamp_step(&l, 110100, 0, 100);                  // pitoaika täynnä: sammumisanimaatio alkaa
+    CHECK(l.state == LAMP_GOODBYE && lamp_warning(&l, 110100), "varoitusväri ei jatkunut sammumisessa");
+    lamp_motion(&l, 115000);                        // liike kesken sammumisen: herääminen valkoisena
+    CHECK(l.state == LAMP_WELCOME && !lamp_warning(&l, 115000), "herääminen ei ollut valkoinen");
+
+    lamp_init(&l, 0);
+    l.hold_ms = 10000;
+    CHECK(lamp_warning(&l, 100), "pitoaikaa pidempi varoitus ei alkanut heti");
+    l.warn_ms = 0;
+    CHECK(!lamp_warning(&l, 9000), "varoitus ei kytkeytynyt pois arvolla 0");
+    printf("varoitusväri: alkaa 15 s ennen sammumista, jatkuu sammumisessa, liike poistaa sen\n");
+}
+
 int main(void) {
     srand(1);
     double gains[] = {0.5, 1.0, 2.0, 4.0, 6.0};
@@ -219,6 +240,7 @@ int main(void) {
     test_reverse();
     test_render_matches();
     test_motion_event();
+    test_warning();
     printf(failures ? "\n%d testiä epäonnistui\n" : "\nKaikki testit läpäisty\n", failures);
     return failures ? 1 : 0;
 }

@@ -11,6 +11,10 @@
  *   LAMP_OFF      nauha pois, odotetaan liikettä
  *   LAMP_WELCOME  heräämisanimaatio, kun liike havaitaan uudelleen
  *
+ * Varoitus: kun pitoajasta on jäljellä warn_ms (oletus 15 s), nauha vaihtaa
+ * meripihkan väriseksi merkiksi siitä, että lamppu sammuu pian. Väri jatkuu
+ * sammumisanimaation ajan, ja liike palauttaa valkoisen heti.
+ *
  * Animaatiot (30 s): heräämisessä valo leviää nauhan keskeltä reunoille ja jokainen
  * LED kirkastuu pehmeästi, kun valon etureuna ohittaa sen. Sammuminen on sama
  * käänteisenä: LEDit himmenevät reunoilta alkaen, ja keskikohta sammuu viimeisenä.
@@ -34,6 +38,7 @@ typedef struct {
     uint8_t  state;
     uint16_t target;          // tavoite valoanturin yksiköissä (0–1023)
     uint32_t hold_ms;         // pitoaika ilman liikettä ennen sammumista
+    uint32_t warn_ms;         // varoitusväri näin kauan ennen sammumista (0 = ei varoitusta)
     uint8_t  ki;              // säätimen kerroin: promillea kirkkautta per ADC-yksikkö per askel
     int16_t  level_pm;        // säätimen kirkkaus promilleina (0–1000 = 0–100 %)
     int32_t  light_f16;       // suodatettu valoanturin lukema × 16; -1 = ei vielä luettu
@@ -46,12 +51,24 @@ static inline void lamp_init(Lamp *l, uint32_t now) {
     l->state = LAMP_ON;
     l->target = 150;
     l->hold_ms = 180000UL;
+    l->warn_ms = 15000UL;
     l->ki = 3;
     l->level_pm = 0;
     l->light_f16 = -1;
     l->last_motion_ms = now;
     l->anim_start_ms = 0;
     l->anim_level_pm = 0;
+}
+
+/* Näytetäänkö varoitusväri: säätötilassa pitoajan viimeiset warn_ms, ja koko
+   sammumisanimaation ajan. Jos warn_ms on pitoaikaa pidempi, varoitus alkaa heti. */
+static inline uint8_t lamp_warning(const Lamp *l, uint32_t now) {
+    if (l->warn_ms == 0) return 0;
+    if (l->state == LAMP_GOODBYE) return 1;
+    if (l->state != LAMP_ON) return 0;
+    uint32_t quiet = now - l->last_motion_ms;
+    uint32_t start = l->warn_ms < l->hold_ms ? l->hold_ms - l->warn_ms : 0;
+    return quiet > start;
 }
 
 static inline uint16_t lamp_light(const Lamp *l) {

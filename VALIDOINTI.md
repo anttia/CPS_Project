@@ -130,3 +130,20 @@ Ennen-viive on laskettu, koska vanhassa firmwaressa ei ole merkkipinniä: pollau
 
 **Rehellinen arvio:** USB-sarjayhteydellä virheitä tulee harvoin, joten odotettu tulos on 0 hylättyä. Arvo on siinä, että se on nyt mitattu eikä oletettu, ja että dashboard ei näytä rikkoutunutta mittausta oikeana.
 
+---
+
+## Varoitusväri ennen sammumista
+
+**Mitä muuttui:** pitoajan viimeiset `warn_ms` (oletus 15 s, komento `W`) nauha on meripihkan värinen, ja väri jatkuu sammumisanimaation ajan. Liike palauttaa valkoisen heti. Dashboard lähettää varoitusajan yhteyden alussa (`--warning`) ja näyttää lähtölaskennan Lamp-välilehdellä.
+
+**Ilman laitetta (jo tehty):** `test_lamp_logic.c` / `test_warning`: varoitus alkaa 45 s:n kohdalla 60 s:n pitoajalla, liike poistaa sen, se jatkuu sammumisanimaatiossa, herääminen on valkoinen, ja arvo 0 kytkee varoituksen pois.
+
+| # | Askel | Hyväksytty, kun |
+| --- | --- | --- |
+| 1 | Käynnistä `python dashboard/dashboard.py --hold-time 60 --warning 15` ja pysy PIR:n näkyvistä poissa. | Noin 45 s viimeisestä liikkeestä nauha vaihtuu meripihkaksi, ja tilarivillä näkyy "Amber: off in … s". |
+| 2 | Liiku PIR:n edessä varoituksen aikana. | Nauha palaa valkoiseksi heti, ja lähtölaskenta katoaa. |
+| 3 | Pysy poissa, kunnes pitoaika täyttyy. | Sammumisanimaatio on meripihkan värinen, ja nauha sammuu noin 30 s:ssa. |
+| 4 | Palaa sammumisen aikana. | Herääminen on valkoinen ilman välähdystä. |
+
+**Huomio säädöstä:** meripihka valaisee anturia vähemmän kuin valkoinen, joten säädin nostaa varoituksen aikana kirkkautta pitääkseen valotason tavoitteessa. Kun valkoinen palaa, kirkkaus laskee takaisin muutamassa sekunnissa. Tämä on suljetun säädön odotettu käytös, ei virhe.
+

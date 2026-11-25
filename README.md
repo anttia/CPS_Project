@@ -56,7 +56,9 @@ Dashboardin käyttöliittymä on englanniksi, koska kurssi on englanninkielinen.
 
 Dashboardin alareunan liukusäädin asettaa **tavoitteen valoanturin yksiköissä** (vihreä katkoviiva), ja Arduino säätää LED-nauhan kirkkautta (violetti käyrä) niin, että anturin lukema pysyy tavoitteessa. Painike "Use current reading" asettaa tavoitteeksi anturin sen hetkisen lukeman. Dashboard lähettää tavoitteen ja pitoajan aina yhteyden alussa ja uudelleen, jos Arduinon ilmoittama tavoite ei vastaa liukusäädintä. "100 %" on suurin kirkkaus, jonka firmwaren virtabudjetti `CURRENT_LIMIT_MA` sallii valkoiselle.
 
-Pitoajan ja säätimen kertoimen voi antaa käynnistyksessä, esim. `python dashboard.py --hold-time 20 --ki 3`. Vanhat suomenkieliset valitsimet (`--pitoaika`, `--paivitys`, `--ei-historiaa`) toimivat edelleen. Lyhyt pitoaika on kätevä animaatioiden testaamiseen.
+**Varoitusväri:** pitoajan viimeiset 15 sekuntia nauha on meripihkan värinen merkkinä siitä, että lamppu sammuu pian, ja väri jatkuu sammumisanimaation ajan. Liike palauttaa valkoisen heti. Lamp-välilehden tilarivillä näkyy silloin lähtölaskenta ("Amber: off in 10 s"). Varoitusajan voi vaihtaa valitsimella `--warning` (0 = ei varoitusta).
+
+Pitoajan, varoitusajan ja säätimen kertoimen voi antaa käynnistyksessä, esim. `python dashboard.py --hold-time 60 --warning 15 --ki 3`. Vanhat suomenkieliset valitsimet (`--pitoaika`, `--paivitys`, `--ei-historiaa`) toimivat edelleen. Lyhyt pitoaika on kätevä animaatioiden testaamiseen.
 
 ## Ajoitus: Timer1 ja keskeytys
 
@@ -142,4 +144,5 @@ Dashboard ymmärtää myös vanhat muodot `pir,valo` ja `pir,valo,kirkkaus,janni
 - `T,<0-1023>`: tavoite valoanturin yksiköissä
 - `H,<1-3600>`: pitoaika sekunteina
 - `K,<1-50>`: säätimen kerroin (promillea kirkkautta per ADC-yksikkö per 100 ms:n askel)
+- `W,<0-600>`: varoitusvärin kesto sekunteina ennen sammumista (0 = ei varoitusta, oletus 15)
 - `D,<0|1>`: ajoituksen validointirivi pois/päälle. Päällä ollessa Arduino lähettää kerran sekunnissa rivin `#diag,tikit,ohitetut,suurin_viive_us,kuorma_promillea`, jonka dashboard näyttää System-välilehdellä (ks. [VALIDOINTI.md](VALIDOINTI.md)). Dashboard ymmärtää myös kaksi lisäkenttää `pir_liikkeet,pir_viive_max_us`, kun firmware mittaa PIR:n viiveen.
