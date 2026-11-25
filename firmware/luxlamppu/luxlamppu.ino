@@ -33,6 +33,14 @@
  *     K,<1-50>      säätimen kerroin (promillea kirkkautta per ADC-yksikkö per askel)
  *
  *     D,<0|1>       ajoituksen validointirivi pois/päälle (ks. alla)
+ *     C,<0-86399>   time of day in seconds since midnight (energy accounting)
+ *
+ * Energy accounting (energy_logic.h): the INA219 power is integrated into energy per
+ * hour of the day in fixed point. The device sends
+ *     E,<clock_s>,<synced>,<day_uWh>,<hour_uWh>   every 10 s
+ *     EH,<hour>,<uWh>,<gap_s>                     when an hour of the day ends
+ *     ED,<uWh>                                    when the day ends at midnight
+ *     #sync,<clock_s before | -1>,<new clock_s>   after each C command (clock drift)
  *
  * Validointi (ks. VALIDOINTI.md): komennolla D,1 laite lähettää kerran sekunnissa rivin
  *     #diag,tikit,myöhästyneet,suurin_viive_us,kuorma_promillea
@@ -55,6 +63,7 @@
 #include <Wire.h>
 #include <Adafruit_INA219.h>
 #include "lamp_logic.h"
+#include "energy_logic.h"
 
 #define NUM_LEDS          39     // nauhan LEDien määrä
 #define CURRENT_LIMIT_MA  900    // virtabudjetti nauhalle: USB-breakout ja vähintään 1 A:n laturi
@@ -83,11 +92,13 @@
 #define TICK_MARK_PIN     PB0    // D8: ISR vaihtaa tilaa joka tikillä (validointia varten)
 #define MOTION_MARK_PIN   PD7    // D7: ylhäällä, kun pääsilmukka on käsitellyt liikkeen (validointia varten)
 #define DIAG_TICKS        100    // validointirivi kerran sekunnissa
+#define ENERGY_TICKS      1000   // energy status line (E) every 10 s
 
 static uint8_t leds[NUM_LEDS * 3];   // jokaiselle LEDille G, R, B
 static uint8_t max_level;            // valkoisen taso (0–255), joka vastaa 100 %
 static Lamp lamp;
 static uint8_t last_pir = 0;         // PIR:n taso pääsilmukan viimeisimmällä tikillä
+static Energy energy;                // strip energy per hour of the day (energy_logic.h)
 
 Adafruit_INA219 ina219;              // osoite 0x40
 static bool ina_ok = false;
@@ -289,6 +300,32 @@ static uint16_t read_light(void) {
     return sum / 32;
 }
 
+/* ---------- Energy accounting: INA219 power integrated per hour of the day ---------- */
+
+/* EH,<hour>,<uWh>,<gap_s>   an hour of the day ended (gap = time without INA219 data)
+   ED,<uWh>                  a day ended at midnight */
+static void report_energy_events(uint8_t events) {
+    if (events & ENERGY_HOUR_DONE) {
+        Serial.print(F("EH,"));
+        Serial.print(energy.done_hour);           Serial.print(',');
+        Serial.print(energy.done_uwh);            Serial.print(',');
+        Serial.println(energy.done_gap_ms / 1000);
+    }
+    if (events & ENERGY_DAY_DONE) {
+        Serial.print(F("ED,"));
+        Serial.println(energy.done_day_uwh);
+    }
+}
+
+/* E,<clock_s>,<synced>,<day_uWh>,<hour_uWh>   status every 10 s */
+static void send_energy_status(void) {
+    Serial.print(F("E,"));
+    Serial.print(energy.clock_ms / 1000);         Serial.print(',');
+    Serial.print(energy.synced);                  Serial.print(',');
+    Serial.print(energy.day_uwh);                 Serial.print(',');
+    Serial.println(energy.hour_uwh);
+}
+
 /* ---------- Komennot dashboardilta ---------- */
 static void handle_command(const char *line) {
     if (line[1] != ',') return;
@@ -298,6 +335,16 @@ static void handle_command(const char *line) {
     case 'H': if (v >= 1 && v <= 3600) lamp.hold_ms = (uint32_t)v * 1000UL; break;
     case 'K': if (v >= 1 && v <= 50) lamp.ki = (uint8_t)v; break;
     case 'D': diag_on = (v != 0); diag_reset(ticks_now()); break;
+    case 'C':                                 // time of day from the dashboard
+        if (v >= 0 && v < 86400L) {
+            /* #sync,<clock before>,<new clock>: the difference over time is the clock drift */
+            Serial.print(F("#sync,"));
+            Serial.print(energy.synced ? (long)(energy.clock_ms / 1000) : -1L);
+            Serial.print(',');
+            Serial.println(v);
+            report_energy_events(energy_set_clock(&energy, (uint32_t)v));
+        }
+        break;
     }
 }
 
@@ -320,7 +367,8 @@ static void read_serial(void) {
     }
 }
 
-static void send_telemetry(void) {
+/* Sends the telemetry line and returns the strip power in mW (-1 = no INA219). */
+static long send_telemetry(void) {
     long mv = -1, ma = -1, mw = -1;
     if (ina_ok) {
         mv = lround(ina219.getBusVoltage_V() * 1000);
@@ -335,6 +383,7 @@ static void send_telemetry(void) {
     Serial.print(mv);                               Serial.print(',');
     Serial.print(ma);                               Serial.print(',');
     Serial.println(mw);
+    return mw;
 }
 
 void setup() {
@@ -355,6 +404,7 @@ void setup() {
     timer1_init();
     pir_init();
     lamp_init(&lamp, ticks_now() * TICK_MS);
+    energy_init(&energy);
     ws_show();                                // kaikki LEDit pois
 
     Serial.print(F("V,"));                    // käännösaika: dashboard näyttää, mikä versio on kortilla
@@ -369,6 +419,7 @@ void setup() {
    oikeina, koska lamp_logic.h vertaa vain aikojen erotuksia. */
 void loop() {
     static uint32_t last_tick = 0, last_control = 0, last_frame = 0, last_send = 0;
+    static uint32_t last_energy = 0, last_energy_status = 0;
     read_serial();
 
     uint32_t t = ticks_now();
@@ -406,7 +457,15 @@ void loop() {
     }
     if (t - last_send >= SEND_TICKS) {
         last_send = t;
-        send_telemetry();
+        long mw = send_telemetry();
+        /* The power is integrated over the time since the previous sample, measured in
+           ticks, so a late sample still covers the right length of time. */
+        report_energy_events(energy_add(&energy, (t - last_energy) * TICK_MS, mw));
+        last_energy = t;
+    }
+    if (t - last_energy_status >= ENERGY_TICKS) {
+        last_energy_status = t;
+        send_energy_status();
     }
     if (diag_on) {
         diag_busy += steps_now() - work_start;

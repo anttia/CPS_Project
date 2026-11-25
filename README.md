@@ -106,6 +106,17 @@ The PIR is not polled. A change on pin D2 (PD2 = PCINT18) triggers the ISR `ISR(
 
 A pin change fires on both edges, so the routine checks the pin level. It was chosen over INT0 because only a pin change or INT0's level trigger can wake the MCU from Power-down sleep, and the PIR's idle level is low. The compiled ISR is 20 instructions.
 
+## Energy accounting on the MCU
+
+This is step 1 of the daily energy budget: the lamp will get a daily energy budget for the LED strip and spend it in the hours when someone is usually present and the room is dark. To enforce a budget, the MCU must know how much energy it has used and at what time of day, also when the dashboard is not running.
+
+- `energy_logic.h` integrates the INA219 power into energy in fixed point, with no floating point: power (mW) × time since the previous sample (ms, measured in Timer1 ticks) = energy in µJ, and every 3600 µJ is one µWh. The remainder is carried to the next sample, so small powers are not rounded away.
+- The energy is booked into the hour of the day in which it was used (24 × 2 bytes). The Uno has no real-time clock, so the dashboard sends the time of day with `C,<seconds since midnight>` when it connects and every 10 minutes. Between the commands the clock runs on the Timer1 ticks.
+- Cost: 88 bytes of SRAM for the `Energy` structure (data use 719 → 809 bytes of 2048) and 1.7 KB of flash (12.9 → 14.6 KB). CPU load in the simulator is unchanged (about 4 %).
+- The Järjestelmä tab of the dashboard shows the energy counted by the MCU today and in the current hour, and the MCU clock. The dashboard saves the energy lines to `dashboard/mittaukset/energia_<date>.csv`.
+
+The counters are in SRAM, so they start from zero when the Uno restarts (also when a serial port is opened, because that resets the Uno). Keeping them over a restart in EEPROM is the next step.
+
 ## Validation
 
 Every firmware change has a test done on the board and a metric that shows the benefit of the change. They are described in [VALIDOINTI.md](VALIDOINTI.md), and the scripts are in the `validointi/` folder. A PR is merged into the main branch only after the test on the board.
@@ -119,6 +130,7 @@ The lamp logic (`lamp_logic.h`) can be tested on a PC without an Arduino in a si
 ```
 cd firmware/luxlamppu/test
 gcc -std=c99 -Wall -Wextra -I.. test_lamp_logic.c -lm -o test && ./test
+gcc -std=c99 -Wall -Wextra -I.. test_energy_logic.c -lm -o test_energy && ./test_energy
 ```
 
 The test checks that control settles at the target without oscillating for different lamp gains, recovers from an unreachable target (anti-windup), turns the lamp off in a bright room, and that the hold time and animations work at the right times.
@@ -140,6 +152,13 @@ The serial port speed is 9600 baud (8N1).
 - `tila`: 0 = off, 1 = control, 2 = turn-off animation, 3 = wake-up animation
 - `jannite_mV`, `virta_mA`, `teho_mW`: strip supply measured by the INA219; -1 if the INA219 does not respond
 
+**Arduino → PC**, energy accounting (energies in µWh):
+
+- `E,<clock_s>,<synced>,<day_uWh>,<hour_uWh>` every 10 s: MCU time of day, 1 if the clock has been set with `C`, energy since midnight and in the current hour
+- `EH,<hour>,<uWh>,<gap_s>` when an hour of the day ends; `gap_s` is the time without a valid INA219 reading
+- `ED,<uWh>` when the day ends at midnight
+- `#sync,<clock_s before | -1>,<new clock_s>` after each `C` command; the difference shows the clock drift
+
 The dashboard also understands the old formats `pir,valo` and `pir,valo,kirkkaus,jannite_mV,virta_mA,teho_mW`.
 
 **PC → Arduino:**
@@ -147,4 +166,5 @@ The dashboard also understands the old formats `pir,valo` and `pir,valo,kirkkaus
 - `T,<0-1023>`: target in light sensor units
 - `H,<1-3600>`: hold time in seconds
 - `K,<1-50>`: controller gain (per mille of brightness per ADC unit per 100 ms step)
+- `C,<0-86399>`: time of day in seconds since midnight (sent by the dashboard when it connects and every 10 minutes)
 - `D,<0|1>`: timing validation line off/on. When on, the Arduino sends once per second the line `#diag,tikit,ohitetut,suurin_viive_us,kuorma_promillea` (ticks, skipped, max delay in µs, load in per mille), which the dashboard shows on the Järjestelmä tab (see [VALIDOINTI.md](VALIDOINTI.md)). The dashboard also understands two extra fields `pir_liikkeet,pir_viive_max_us` (PIR motion count, max PIR latency in µs) when the firmware measures PIR latency.

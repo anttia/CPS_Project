@@ -34,6 +34,16 @@ punaisen ilmoituksen ja yrittää yhdistää uudelleen automaattisesti.
 
 Kaikki vastaanotettu data tallentuu myös CSV-tiedostoon.
 
+Energy accounting on the MCU: the dashboard sends the time of day (C,<seconds since
+midnight>) when the connection opens and every 10 minutes, because the Uno has no
+real-time clock. The firmware integrates the strip power per hour of the day and sends
+    E,<clock_s>,<synced>,<day_uWh>,<hour_uWh>   every 10 s
+    EH,<hour>,<uWh>,<gap_s>                     when an hour ends
+    ED,<uWh>                                    when the day ends
+    #sync,<clock_s before | -1>,<new clock_s>   after each C command
+These lines are saved with PC timestamps to mittaukset/energia_<time>.csv
+(validointi/validoi_energia.py compares them with the PC's own integral).
+
 Käyttö:
     pip install pyserial matplotlib
     python dashboard.py                 # etsii Arduinon sarjaportin automaattisesti
@@ -91,6 +101,8 @@ LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mittaukset")
 DIAG_WINDOW_S = 600      # Järjestelmä-välilehden kaavioiden aikaväli (10 min)
 DIAG_STALE_S = 5         # näin kauan ilman #diag-riviä: firmware ei lähetä niitä
 TICK_MS = 10             # firmwaren Timer1-tikki
+CLOCK_SYNC_S = 600       # how often the time of day is sent to the MCU (C command)
+ENERGY_PREFIXES = ("E,", "EH,", "ED,", "#sync,")   # energy accounting lines from the MCU
 LOAD_COLOR = "#38bdf8"
 LATENCY_COLOR = "#fbbf24"
 STATE_NAMES = {0: "pois (ei liikettä)", 1: "säätö", 2: "sammumisanimaatio", 3: "heräämisanimaatio"}
@@ -135,6 +147,9 @@ class State:
         self.error = None            # näkyvä virheilmoitus tai None
         self.energy_mwh = 0.0
         self._last_power_t = None
+        self.mcu_energy = None       # latest E line: dict(clock_s, synced, day_uwh, hour_uwh)
+        self.energy_log = None       # csv.writer for the energy lines, or None
+        self.last_clock_sync = 0.0   # time.time() of the last C command
 
         self.desired = DEFAULT_TARGET  # liukusäätimen tavoite (valoanturin yksiköissä)
         self.hold_s = 180            # pitoaika sekunteina
@@ -254,6 +269,16 @@ class State:
         with self.lock:
             self.diag.append((t,) + diag)
 
+    def add_energy_line(self, t, line):
+        """Stores an energy accounting line from the MCU (E, EH, ED, #sync)."""
+        with self.lock:
+            if self.energy_log is not None:
+                self.energy_log.writerow([datetime.fromtimestamp(t).isoformat(timespec="milliseconds"),
+                                          line])
+            e = parse_energy_status(line)
+            if e is not None:
+                self.mcu_energy = e
+
     def system_snapshot(self, now):
         """Järjestelmä-välilehden tiedot: #diag-rivit ja telemetrian tahti."""
         with self.lock:
@@ -297,6 +322,26 @@ def parse_line(line):
         return None
     sample.update(bright=bright, target=target, state=state, mv=mv, ma=ma, mw=mw)
     return sample
+
+
+def parse_energy_status(line):
+    """'E,36000,1,152000,4000' -> dict(clock_s, synced, day_uwh, hour_uwh), else None."""
+    parts = line.strip().split(",")
+    if parts[0] != "E" or len(parts) != 5:
+        return None
+    try:
+        clock_s, synced, day_uwh, hour_uwh = (int(p) for p in parts[1:])
+    except ValueError:
+        return None
+    if not 0 <= clock_s < 86400 or synced not in (0, 1):
+        return None
+    return dict(clock_s=clock_s, synced=synced, day_uwh=day_uwh, hour_uwh=hour_uwh)
+
+
+def seconds_since_midnight(now=None):
+    """Local time of day in whole seconds, for the C command."""
+    d = datetime.fromtimestamp(time.time() if now is None else now)
+    return d.hour * 3600 + d.minute * 60 + d.second
 
 
 def parse_diag(line):
@@ -383,6 +428,9 @@ def serial_reader(port, baud, state, log):
                         diag = parse_diag(raw)
                         if diag:
                             state.add_diag(time.time(), diag)
+                        continue
+                    if raw.startswith(ENERGY_PREFIXES):
+                        state.add_energy_line(time.time(), raw.strip())
                         continue
                     sample = parse_line(raw)
                     if sample is None:
@@ -526,11 +574,18 @@ def demo_reader(state, log, sim):
     with state.lock:
         state.firmware = "demo"
     start, next_diag, pir_n, pir_max, last_pir = time.time(), time.time() + 1, 0, 0, 0
+    day_uwh, hour_uwh, next_energy = 0.0, 0.0, time.time() + 10
     while True:
         now = time.time()
         sample = sim.step(now)
         state.add(now, sample)
         log_sample(log, now, sample)
+        day_uwh += sample["mw"] * 200 / 3600       # simulated MCU energy accounting
+        hour_uwh += sample["mw"] * 200 / 3600
+        if now >= next_energy:
+            state.add_energy_line(now, f"E,{seconds_since_midnight(now)},1,{int(day_uwh)},"
+                                       f"{int(hour_uwh)}")
+            next_energy += 10
         if sample["pir"] and not last_pir:          # simuloitu PIR-viive liikkeen alussa
             pir_n += 1
             pir_max = max(pir_max, random.randint(50, 9500))
@@ -763,6 +818,10 @@ def sync_settings(state, snap, now):
             if state.ki is not None:
                 state.write(f"K,{state.ki}")
             state.need_config = False
+            state.last_clock_sync = 0.0       # new connection: send the clock now
+        if now - state.last_clock_sync >= CLOCK_SYNC_S:
+            state.write(f"C,{seconds_since_midnight(now)}")   # the Uno has no real-time clock
+            state.last_clock_sync = now
         if latest["target"] == want:
             return
         changed = state.last_sent != want
@@ -869,6 +928,16 @@ def make_updater(state, ax, ax_b, ax_p, art):
     return update
 
 
+def format_mcu_energy(e):
+    """Energy counted by the MCU itself (E line)."""
+    if e is None:
+        return "MCU energy: no E lines (older firmware)"
+    clock = f"{e['clock_s'] // 3600:02d}:{e['clock_s'] // 60 % 60:02d}"
+    return (f"MCU energy today: {fmt_energy(e['day_uwh'] / 1000)}, this hour "
+            f"{fmt_energy(e['hour_uwh'] / 1000)} (MCU clock {clock}"
+            f"{'' if e['synced'] else ', not synced'})")
+
+
 def build_system_figure():
     """Järjestelmä-välilehti: firmwaren ajoitusmittarit (#diag-rivit)."""
     fig = Figure(figsize=(9.5, 9.2))
@@ -952,7 +1021,7 @@ def make_system_updater(state, ax_load, ax_lat, art):
             ina = "ei vastaa"
         else:
             ina = "toimii"
-        art["line5"].set_text(f"INA219: {ina}")
+        art["line5"].set_text(f"INA219: {ina}    {format_mcu_energy(state.mcu_energy)}")
         art["note"].set_text("Mittarit laskee firmware itse Timer1:n 4 µs:n tarkkuudella ja lähettää "
                              "kerran sekunnissa. Virallinen todiste: validointi/validoi_ajoitus.py.")
 
@@ -1015,6 +1084,13 @@ def main():
     log = csv.writer(logfile)
     log.writerow(["aika", "pir", "valo", "kirkkaus_pct", "tavoite", "tila",
                   "jannite_mV", "virta_mA", "teho_mW"])
+    log_dir = os.path.dirname(os.path.abspath(args.log))
+    energy_name = os.path.basename(args.log).replace("mittaus_", "energia_").replace("demo_", "energia_demo_")
+    if energy_name == os.path.basename(args.log):
+        energy_name = "energia_" + energy_name
+    energy_file = open(os.path.join(log_dir, energy_name), "w", newline="", buffering=1)
+    state.energy_log = csv.writer(energy_file)
+    state.energy_log.writerow(["time", "line"])
 
     if args.demo:
         target, targs = demo_reader, (state, log, sim)
@@ -1025,6 +1101,7 @@ def main():
 
     run_window(state, args.paivitys)
     logfile.close()
+    energy_file.close()
 
 
 def run_window(state, interval_s):
