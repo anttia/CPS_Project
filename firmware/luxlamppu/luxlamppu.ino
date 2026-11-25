@@ -11,6 +11,8 @@
  *
  * Toiminta (lamp_logic.h):
  *   - säätö pitää valoanturin lukeman tavoitteessa: LED-nauha on toimilaite
+ *   - pitoajan viimeiset 15 s (komento W) nauha on meripihkan värinen merkkinä siitä,
+ *     että lamppu sammuu pian; liike palauttaa valkoisen heti
  *   - kun liikettä ei ole havaittu pitoaikaan (oletus 3 min), nauha sammuu 30 s:n
  *     animaatiolla: LEDit himmenevät reunoilta kohti keskikohtaa
  *   - kun liike havaitaan uudelleen, valo leviää keskeltä reunoille ja kirkastuu 30 s:ssa,
@@ -32,6 +34,7 @@
  *     T,<0-1023>    tavoite valoanturin yksiköissä
  *     H,<1-3600>    pitoaika sekunteina
  *     K,<1-50>      säätimen kerroin (promillea kirkkautta per ADC-yksikkö per askel)
+ *     W,<0-600>     varoitusvärin kesto sekunteina ennen sammumista (0 = ei varoitusta)
  *
  *     D,<0|1>       ajoituksen validointirivi pois/päälle (ks. alla)
  *
@@ -248,6 +251,10 @@ static uint8_t compute_max_level(void) {
     return (uint8_t)((CURRENT_LIMIT_MA - idle_ma) * 255UL / (full_ma - idle_ma));
 }
 
+// Värit kanavittain (G, R, B) 1/256-osina: kerroin 256 = täysi. Kertolasku ja siirto >> 8
+// on 8-bittiselle AVR:lle paljon nopeampi kuin jakolasku, joka hidastaisi animaatiota.
+static const uint16_t WHITE_GRB[3] = {256, 256, 256};
+static const uint16_t WARN_GRB[3]  = {115, 256, 0};    // meripihka: punainen täysi, vihreä 45 %, ei sinistä
 static int16_t led_pm[NUM_LEDS];     // LEDien kirkkaudet promilleina (lamp_render_pm)
 static int16_t display_pm = 0;       // nauhan keskimääräinen kirkkaus viimeisimmästä piirrosta
 
@@ -257,15 +264,23 @@ static int16_t display_pm = 0;       // nauhan keskimääräinen kirkkaus viimei
 static bool render(uint32_t now) {
     bool changed = false;
     display_pm = lamp_render_pm(&lamp, NUM_LEDS, now, led_pm);
+    // Väri kanavittain: valkoinen, tai meripihka varoituksena
+    // siitä, että lamppu sammuu pian. Meripihka ottaa vähemmän virtaa kuin valkoinen,
+    // joten virtabudjetti pysyy voimassa.
+    const uint16_t *color = lamp_warning(&lamp, now) ? WARN_GRB : WHITE_GRB;
     int16_t prev_pm = -1;
-    uint8_t level = 0;
+    uint8_t g = 0, r = 0, b = 0;
     for (uint16_t i = 0; i < NUM_LEDS; i++) {
-        if (led_pm[i] != prev_pm) {           // sama arvo kuin edellisellä: ei jakolaskua
+        if (led_pm[i] != prev_pm) {           // sama arvo kuin edellisellä: ei laskentaa
             prev_pm = led_pm[i];
-            level = (uint32_t)prev_pm * max_level / 1000;
+            uint16_t level = (uint32_t)prev_pm * max_level / 1000;   // 0–255
+            g = (level * color[0]) >> 8;
+            r = (level * color[1]) >> 8;
+            b = (level * color[2]) >> 8;
         }
-        if (leds[3 * i] != level) changed = true;
-        leds[3 * i] = leds[3 * i + 1] = leds[3 * i + 2] = level;   // valkoinen: G = R = B
+        uint8_t *led = &leds[3 * i];
+        if (led[0] != g || led[1] != r || led[2] != b) changed = true;
+        led[0] = g; led[1] = r; led[2] = b;
     }
     if (changed) ws_show();                   // nauha päivitetään vain muutoksista
     return changed;
@@ -299,6 +314,7 @@ static void handle_command(const char *line) {
     case 'T': if (v >= 0 && v <= 1023) lamp.target = (uint16_t)v; break;
     case 'H': if (v >= 1 && v <= 3600) lamp.hold_ms = (uint32_t)v * 1000UL; break;
     case 'K': if (v >= 1 && v <= 50) lamp.ki = (uint8_t)v; break;
+    case 'W': if (v >= 0 && v <= 600) lamp.warn_ms = (uint32_t)v * 1000UL; break;
     case 'D': diag_on = (v != 0); diag_reset(ticks_now()); break;
     }
 }
